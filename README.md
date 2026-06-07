@@ -120,6 +120,62 @@ mux.Handle("/signal/trade", aegiswebhook.Handler(
 http.ListenAndServe(":8080", mux)
 ```
 
+## Protocol reference
+
+Remote producers reach the gateway through one of two transports. Both validate, size server-side, dedup, and return the same `SignalResult`. **The caller never sends position size** — it is computed inside the executor from account balance, `RiskPct`, and the SL distance.
+
+### MCP — the `place_trade` tool
+
+- **Endpoint:** `POST /mcp` (MCP Streamable HTTP). **Auth:** `Authorization: Bearer <token>`.
+- **Tool:** `place_trade`
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `symbol` | string | ✓ | e.g. `EURUSD`, `GBPJPY`, `BTCUSD` |
+| `direction` | string | ✓ | `BUY` \| `SELL` |
+| `order_type` | string | ✓ | `limit` \| `market` |
+| `entry` | number | ✓ | absolute price, in the symbol's quote units |
+| `stop_loss` | number | ✓ | BUY: below entry · SELL: above entry |
+| `take_profit` | number | ✓ | BUY: above entry · SELL: below entry · RR must be ≥ `MinRR` (default 1.5) |
+| `strategy` | string | ✓ | one of the gateway's `AllowedStrategies` (advertised as an enum in the tool schema) |
+| `note` | string | – | free-text rationale, recorded with the trade |
+| `idempotency_key` | string | – | `[A-Za-z0-9._-]`, ≤ 64 chars → stable `signal_id`; omit for a server-generated one |
+
+**Result** (JSON text content):
+
+```json
+{ "accepted": true, "placed": true, "code": "placed",
+  "reason": "", "signal_id": "claude-ab12", "broker_order_id": "DIATF8U2" }
+```
+
+A gateway rejection (e.g. RR below floor, symbol not executable, duplicate) is a **normal result with `accepted: false`** and a `code`/`reason` — not a tool error. Only an internal failure is an MCP tool error.
+
+### Webhook — signed POST
+
+- **Endpoint:** a path you mount (e.g. `POST /signal/trade`).
+- **Signature header:** `X-Signature: sha256=<hex>` — HMAC-SHA256 of the **raw request body**, keyed by the shared secret, constant-time verified.
+- **Body** (`application/json`, ≤ 64 KiB):
+
+| Field | Type | Notes |
+|---|---|---|
+| `signal_id` | string | idempotency key |
+| `timestamp` | int64 | unix seconds; must be within ±60 s of now (replay window, configurable) |
+| `symbol`, `direction`, `order_type` | string | as in the MCP tool |
+| `entry`, `stop_loss`, `take_profit` | number | as in the MCP tool |
+| `strategy` | string | allowlisted |
+| `note` | string | optional |
+
+**Response status:** `200` accepted/placed · `400` validation reject or stale timestamp · `409` duplicate in-flight · `401` bad/missing signature. The body carries the same `SignalResult` fields.
+
+Signing example:
+
+```bash
+BODY='{"signal_id":"sig-001","timestamp":1733580000,"symbol":"EURUSD","direction":"BUY","order_type":"limit","entry":1.0850,"stop_loss":1.0810,"take_profit":1.0910,"strategy":"smc"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SIGNING_SECRET" | awk '{print $2}')
+curl -X POST https://host/signal/trade \
+  -H "X-Signature: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"
+```
+
 ## The injected-hooks model
 
 Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a standalone default that is used when the field is nil. The **security-critical** defaults fail closed: `ExecutabilityCheck` rejects out-of-universe symbols (no accidental equity orders to a CFD broker) and `QuoteConverter` prevents silent mis-sizing. The `SessionGate` and `IsAlgoPair` defaults are **permissive** (trade any session; treat forex as algo-driven) — inject your own to restrict.
