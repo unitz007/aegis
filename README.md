@@ -1,6 +1,6 @@
 # aegis
 
-**Status: pre-release (v0) — API may change before v1.0. No stable release tag has been cut yet.**
+**Status: v0.1.0 — first tagged release. The API may still change before v1.0.**
 
 aegis is a standalone, open-source trade-execution safety harness for algorithmic trading systems. It lets any agent or signal producer — whether a language model talking over MCP, a pipeline posting a signed webhook, or in-process Go code — place trades through a pluggable broker adapter, with server-side position sizing, dealing-rules clamping, dedup/idempotency, allowlist-based authentication, and fail-closed safety defaults baked in. aegis defines its own types and imports nothing from any trading-system internals: drop it in, wire your `broker.Port`, populate an `AllowedSources` / `AllowedStrategies` allowlist, and submit `TradeSignal`s.
 
@@ -90,9 +90,39 @@ go run github.com/unitz007/aegis/examples@latest
 go run ./examples
 ```
 
+## Mounting the transports
+
+The same gateway can be exposed to remote agents over MCP (a `place_trade` tool) and/or a signed webhook. Both handlers are fail-closed — pass an empty token/secret and they serve `503`.
+
+```go
+import (
+    "net/http"
+    "os"
+
+    aegismcp "github.com/unitz007/aegis/transport/mcp"
+    aegiswebhook "github.com/unitz007/aegis/transport/webhook"
+)
+
+mux := http.NewServeMux()
+
+// MCP: language models call the place_trade tool (bearer auth).
+mux.Handle("/mcp", aegismcp.Handler(
+    os.Getenv("MCP_AUTH_TOKEN"), gw, nil,
+    aegismcp.WithSourceTag("claude"),
+))
+
+// Webhook: pipelines POST an HMAC-SHA256 signed signal.
+mux.Handle("/signal/trade", aegiswebhook.Handler(
+    os.Getenv("WEBHOOK_SIGNING_SECRET"), gw,
+    aegiswebhook.WithSourceTag("ci"),
+))
+
+http.ListenAndServe(":8080", mux)
+```
+
 ## The injected-hooks model
 
-Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a safe standalone default that is used when the field is nil. **All defaults fail closed** — they restrict rather than permit.
+Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a standalone default that is used when the field is nil. The **security-critical** defaults fail closed: `ExecutabilityCheck` rejects out-of-universe symbols (no accidental equity orders to a CFD broker) and `QuoteConverter` prevents silent mis-sizing. The `SessionGate` and `IsAlgoPair` defaults are **permissive** (trade any session; treat forex as algo-driven) — inject your own to restrict.
 
 | Hook | Type | Where injected | Safe default | Default behaviour |
 |---|---|---|---|---|
@@ -119,6 +149,10 @@ The defaults for `SymbolClassifier` and `ExecutabilityCheck` were chosen to matc
 - **Fail-closed auth on every transport.** The MCP handler returns 503 when `authToken` is empty; the webhook handler returns 503 when the signing secret is empty. Neither handler dispatches any tool logic in the disabled state.
 
 - **Validation runs before slot reservation.** Allowlist, content, RR-floor, and executability checks all run before `getOrReserve` — a rejected signal never burns an idempotency slot.
+
+## Running in production
+
+aegis was extracted from [StockAI](https://github.com/unitz007/finOS), which consumes it live: external agents place trades over the MCP and webhook transports, and the internal strategy pipeline routes through the same gateway. The safety defaults and invariants documented above are the ones that gate real broker orders there.
 
 ## License
 
