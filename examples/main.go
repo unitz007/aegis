@@ -85,11 +85,9 @@ func main() {
 			AllowedSources: []string{
 				"demo-agent", // the source tag used in the signals below
 			},
-			AllowedStrategies: []string{
-				"smc",      // Smart Money Concepts structural analysis
-				"momentum", // any additional strategy the caller uses
-			},
 			MinRR: 1.5, // reject signals whose reward:risk < 1.5
+			// Strategy is free-text provenance — not validated. Callers may pass
+			// any string (e.g. "smc", "topdown", "my-experiment-v3").
 			// Logger and Clock left nil → use log.Default() and time.Now.
 		},
 	)
@@ -245,10 +243,9 @@ func main() {
 	fmt.Printf("  Webhook handler mounted at /signal/trade  (secret non-empty=%t)\n",
 		webhookSecret != "")
 
-	// Demonstrate that gw.AllowedStrategies() can be used to advertise the
-	// strategy enum without duplicating the allowlist (e.g. in API docs / MCP
-	// tool schema).  The MCP handler uses this internally.
-	fmt.Printf("  Gateway allowed strategies: %v\n", gw.AllowedStrategies())
+	// Strategy is free-text provenance — not validated by the gateway.
+	// Any string the caller passes in TradeSignal.Strategy is accepted as-is.
+	fmt.Println("  Strategy field: free-text provenance (not validated — any string accepted)")
 	fmt.Println()
 	fmt.Println("Done. Run `go run ./examples` to see this output.")
 

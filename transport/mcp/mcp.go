@@ -54,9 +54,8 @@ func WithSourceTag(tag string) Option {
 	}
 }
 
-// WithDefaultStrategy sets the strategy used when the caller supplies none.
-// Default: first entry of the gateway's AllowedStrategies list (or "smc_engine"
-// when the list is empty).
+// WithDefaultStrategy sets the strategy stamped on every MCP-submitted signal
+// when the caller omits the strategy field. Default: "smc_engine".
 func WithDefaultStrategy(s string) Option {
 	return func(c *config) {
 		c.defaultStrategy = s
@@ -90,12 +89,7 @@ func Handler(authToken string, gateway aegis.Gateway, logger *log.Logger, opts .
 		o(cfg)
 	}
 	if cfg.defaultStrategy == "" {
-		strats := gateway.AllowedStrategies()
-		if len(strats) > 0 {
-			cfg.defaultStrategy = strats[0]
-		} else {
-			cfg.defaultStrategy = "smc_engine"
-		}
+		cfg.defaultStrategy = "smc_engine"
 	}
 
 	mcpSrv := server.NewMCPServer(
@@ -127,24 +121,13 @@ func Enabled(authToken string, gateway aegis.Gateway) bool {
 // verdict — including validation rejections — is returned as a tool result (JSON
 // text), never as a transport error, so the agent can self-correct.
 func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *config, logger *log.Logger) {
-	// Build the strategy enum from the gateway's allowlist so the tool schema
-	// always matches the gateway's validation. Fall back to a minimal hint if
-	// the list is empty (the gateway will still reject unknown strategies).
-	strats := gateway.AllowedStrategies()
-	stratEnum := make([]string, len(strats))
-	copy(stratEnum, strats)
-
-	stratDescription := "Strategy that derived the levels."
-	if len(stratEnum) > 0 {
-		stratDescription = fmt.Sprintf("Strategy that derived the levels. Allowed: %s.", strings.Join(stratEnum, ", "))
-	}
-
-	toolOpts := []mcp.ToolOption{
+	tool := mcp.NewTool(
+		"place_trade",
 		mcp.WithDescription(
-			"Submit a forex/crypto/stock trade signal to the aegis gateway. The signal is " +
-				"validated, sized, deduplicated and (if accepted) routed to the live broker " +
-				"by the server-side Gateway. Position size is decided server-side and is NOT " +
-				"an input. Returns the gateway verdict; a validation rejection is a normal " +
+			"Submit a forex/crypto/stock trade signal to the aegis gateway. The signal is "+
+				"validated, sized, deduplicated and (if accepted) routed to the live broker "+
+				"by the server-side Gateway. Position size is decided server-side and is NOT "+
+				"an input. Returns the gateway verdict; a validation rejection is a normal "+
 				"result (accepted=false with a reason), not an error.",
 		),
 		mcp.WithString("symbol", mcp.Required(),
@@ -159,25 +142,15 @@ func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *co
 			mcp.Description("Stop-loss price. BUY: below entry. SELL: above entry.")),
 		mcp.WithNumber("take_profit", mcp.Required(),
 			mcp.Description("Take-profit price. BUY: above entry. SELL: below entry. RR must be >= 1.5.")),
+		mcp.WithString("strategy", mcp.Required(),
+			mcp.Description("Free-text strategy name identifying how the levels were derived (e.g. smc_engine, topdown, zone_internal). Carried for provenance — not validated by the gateway.")),
 		mcp.WithString("note",
 			mcp.Description("Optional free-text rationale recorded with the trade.")),
 		mcp.WithString("idempotency_key",
 			mcp.Description("Optional caller-supplied idempotency key (A-Z a-z 0-9 . _ -, max 64 chars). "+
 				"When provided, it is sanitized and used as the signal_id so repeated calls "+
 				"with the same key return the cached gateway verdict without re-placing.")),
-	}
-
-	// Add strategy field: with enum if we have strategies, without if not.
-	if len(stratEnum) > 0 {
-		toolOpts = append(toolOpts, mcp.WithString("strategy", mcp.Required(),
-			mcp.Enum(stratEnum...),
-			mcp.Description(stratDescription)))
-	} else {
-		toolOpts = append(toolOpts, mcp.WithString("strategy", mcp.Required(),
-			mcp.Description(stratDescription)))
-	}
-
-	tool := mcp.NewTool("place_trade", toolOpts...)
+	)
 	mcpSrv.AddTool(tool, placeTradeHandler(gateway, cfg, logger))
 }
 
@@ -187,11 +160,6 @@ func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *co
 func placeTradeHandler(gateway aegis.Gateway, cfg *config, logger *log.Logger) server.ToolHandlerFunc {
 	if logger == nil {
 		logger = log.Default()
-	}
-	// Build the allowed-strategy set for pre-validation before gateway call.
-	allowedStrats := make(map[string]struct{})
-	for _, s := range gateway.AllowedStrategies() {
-		allowedStrats[strings.ToLower(s)] = struct{}{}
 	}
 
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -224,20 +192,12 @@ func placeTradeHandler(gateway aegis.Gateway, cfg *config, logger *log.Logger) s
 		if err != nil {
 			return mcp.NewToolResultError("strategy is required"), nil
 		}
-
-		// ── Strategy pre-validation (before gateway, so gateway is never called
-		//    for a clearly invalid strategy) ────────────────────────────────────
-		normalizedStrategy := strings.ToLower(strings.TrimSpace(strategyArg))
-		if len(allowedStrats) > 0 {
-			if _, ok := allowedStrats[normalizedStrategy]; !ok {
-				strats := gateway.AllowedStrategies()
-				return mcp.NewToolResultError(fmt.Sprintf(
-					"strategy %q is not in the allowed list: %s",
-					strategyArg, strings.Join(strats, ", "))), nil
-			}
-		}
-		// Use original (non-lowercased) value — the gateway allowlist may be case-sensitive.
+		// Strategy is free-text provenance; use it as supplied (trimmed).
+		// Fall back to the configured default if empty.
 		strategy := strings.TrimSpace(strategyArg)
+		if strategy == "" {
+			strategy = cfg.defaultStrategy
+		}
 
 		note := req.GetString("note", "")
 

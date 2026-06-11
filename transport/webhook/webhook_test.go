@@ -21,12 +21,11 @@ import (
 // ── Stub gateway ──────────────────────────────────────────────────────────────
 
 type stubGateway struct {
-	mu         sync.Mutex
-	calls      []aegis.TradeSignal
-	res        aegis.SignalResult
-	err        error
-	callCnt    int
-	strategies []string
+	mu      sync.Mutex
+	calls   []aegis.TradeSignal
+	res     aegis.SignalResult
+	err     error
+	callCnt int
 }
 
 func (s *stubGateway) Submit(_ context.Context, sig aegis.TradeSignal) (aegis.SignalResult, error) {
@@ -35,12 +34,6 @@ func (s *stubGateway) Submit(_ context.Context, sig aegis.TradeSignal) (aegis.Si
 	s.callCnt++
 	s.calls = append(s.calls, sig)
 	return s.res, s.err
-}
-
-func (s *stubGateway) AllowedStrategies() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.strategies
 }
 
 func (s *stubGateway) count() int {
@@ -103,7 +96,7 @@ func decodeResponse(t *testing.T, rec *httptest.ResponseRecorder) map[string]any
 }
 
 func newGW(res aegis.SignalResult, err error) *stubGateway {
-	return &stubGateway{res: res, err: err, strategies: []string{"smc_engine"}}
+	return &stubGateway{res: res, err: err}
 }
 
 // ── Core security tests ───────────────────────────────────────────────────────
@@ -325,7 +318,7 @@ func TestWebhook_ExecutorSkipIs200(t *testing.T) {
 }
 
 func TestWebhook_GatewayErrorIs500(t *testing.T) {
-	gw := &stubGateway{err: fmt.Errorf("internal boom"), strategies: []string{"smc_engine"}}
+	gw := &stubGateway{err: fmt.Errorf("internal boom")}
 	h := Handler(testSecret, gw)
 
 	rec := httptest.NewRecorder()

@@ -10,7 +10,8 @@
 //  2. An in-flight race loser returns ReasonInFlight (not ReasonValidation).
 //  3. A PlaceFunc error is surfaced as Accepted=true/Placed=false/ReasonExecutorSkip
 //     so the signal_id is finalized and retries return the same terminal state.
-//  4. Empty AllowedSources or AllowedStrategies means reject-all (fail-closed).
+//  4. Empty AllowedSources means reject-all (fail-closed). Strategy is free-text
+//     provenance carried for attribution — it is never validated.
 package aegis
 
 import (
@@ -26,11 +27,11 @@ import (
 
 // TradeSignal is the unified, agent-agnostic trade request submitted to the
 // Gateway. All price levels are absolute prices in the symbol's quote units.
-// Source and Strategy are plain strings; the Gateway validates them against
-// caller-configured allowlists in GatewayConfig.
+// Source is validated against AllowedSources in GatewayConfig. Strategy is
+// free-text provenance carried for attribution; it is never validated.
 type TradeSignal struct {
 	Source     string  `json:"source"`     // who produced it — validated against AllowedSources
-	Strategy   string  `json:"strategy"`   // how levels were derived — validated against AllowedStrategies
+	Strategy   string  `json:"strategy"`   // how levels were derived — free-text, carried for provenance
 	SignalID   string  `json:"signal_id"`  // idempotency key — required, non-empty
 	Symbol     string  `json:"symbol"`
 	Direction  string  `json:"direction"`  // "BUY" | "SELL"
@@ -105,17 +106,12 @@ type OrderIntent struct {
 // ── Gateway interface and config ──────────────────────────────────────────────
 
 // Gateway is the unified submission interface for trade signals.
-// A single Submit call owns: allowlist validation, signal content validation,
-// RR floor, idempotency (atomic reserve), OrderIntent construction, and
-// delegation to the Executor via PlaceFunc.
-//
-// AllowedStrategies returns the list of strategy strings the gateway accepts.
-// Transport adapters (e.g. MCP) call this to advertise and pre-validate the
-// strategy enum without duplicating the allowlist. The slice is a snapshot;
-// callers must not mutate it.
+// A single Submit call owns: allowlist validation (source only), signal content
+// validation, RR floor, idempotency (atomic reserve), OrderIntent construction,
+// and delegation to the Executor via PlaceFunc.
+// Strategy is free-text provenance — it is accepted as-is and never validated.
 type Gateway interface {
 	Submit(ctx context.Context, sig TradeSignal) (SignalResult, error)
-	AllowedStrategies() []string
 }
 
 // PlaceFunc is the executor callback injected into the Gateway.
@@ -141,10 +137,6 @@ type GatewayConfig struct {
 	// AllowedSources is the set of source strings the Gateway accepts.
 	// Empty = reject all (fail-closed). Callers must populate this.
 	AllowedSources []string
-
-	// AllowedStrategies is the set of strategy strings the Gateway accepts.
-	// Empty = reject all (fail-closed). Callers must populate this.
-	AllowedStrategies []string
 
 	// MinRR is the minimum reward-to-risk ratio a signal must satisfy.
 	// Default: 1.5.
@@ -180,14 +172,6 @@ func (c GatewayConfig) allowedSourcesSet() map[string]struct{} {
 	return m
 }
 
-func (c GatewayConfig) allowedStrategiesSet() map[string]struct{} {
-	m := make(map[string]struct{}, len(c.AllowedStrategies))
-	for _, s := range c.AllowedStrategies {
-		m[s] = struct{}{}
-	}
-	return m
-}
-
 // NewGateway constructs a Gateway. place must be non-nil.
 // Default values are applied for any zero-valued config fields.
 func NewGateway(place PlaceFunc, cfg GatewayConfig) (Gateway, error) {
@@ -216,7 +200,6 @@ func NewGateway(place PlaceFunc, cfg GatewayConfig) (Gateway, error) {
 		place:    place,
 		cfg:      cfg,
 		sources:  cfg.allowedSourcesSet(),
-		strats:   cfg.allowedStrategiesSet(),
 		inflight: make(map[string]inflightEntry),
 		done:     make(map[string]signalEntry),
 	}, nil
@@ -244,7 +227,6 @@ type signalGateway struct {
 	place   PlaceFunc
 	cfg     GatewayConfig
 	sources map[string]struct{}
-	strats  map[string]struct{}
 
 	mu       sync.Mutex
 	inflight map[string]inflightEntry // signal_ids currently being placed
@@ -376,9 +358,6 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 	if _, ok := g.sources[sig.Source]; !ok {
 		return reject(fmt.Sprintf("unknown source %q — not in AllowedSources", sig.Source))
 	}
-	if _, ok := g.strats[sig.Strategy]; !ok {
-		return reject(fmt.Sprintf("unknown strategy %q — not in AllowedStrategies", sig.Strategy))
-	}
 	if sig.Symbol == "" {
 		return reject("symbol must be non-empty")
 	}
@@ -464,16 +443,6 @@ func (g *signalGateway) getOrReserve(key string) (SignalResult, string) {
 	}
 	g.inflight[key] = inflightEntry{reservedAt: now}
 	return SignalResult{}, ""
-}
-
-// AllowedStrategies returns a snapshot of the configured strategy allowlist.
-// The returned slice is a copy; callers may not mutate it.
-func (g *signalGateway) AllowedStrategies() []string {
-	s := make([]string, 0, len(g.strats))
-	for k := range g.strats {
-		s = append(s, k)
-	}
-	return s
 }
 
 // finalize promotes a slot from in-flight to done with the final result.

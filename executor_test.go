@@ -364,7 +364,6 @@ func TestGateway_InFlight_RaceLosers_GetReasonInFlight(t *testing.T) {
 
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources:     []string{"test-agent"},
-		AllowedStrategies:  []string{"smc"},
 		ExecutabilityCheck: aegis.AllExecutable,
 	})
 	if err != nil {
@@ -428,7 +427,6 @@ func TestGateway_ExecutorError_ReasonExecutorSkip_Cached(t *testing.T) {
 
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources:     []string{"test-agent"},
-		AllowedStrategies:  []string{"smc"},
 		ExecutabilityCheck: aegis.AllExecutable,
 	})
 	if err != nil {
@@ -546,9 +544,8 @@ func TestDefaultExecutability_StockRejected_NoSlotConsumed(t *testing.T) {
 
 	// Use DefaultExecutability (the default — no explicit check needed).
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
-		MinRR:             1.5,
+		AllowedSources: []string{"test-agent"},
+		MinRR:          1.5,
 		// ExecutabilityCheck is intentionally omitted → defaults to DefaultExecutability.
 	})
 	if err != nil {
@@ -594,8 +591,7 @@ func TestDefaultExecutability_ForexPasses(t *testing.T) {
 		return "broker-001", true, nil
 	}
 	gw, _ := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
+		AllowedSources: []string{"test-agent"},
 	})
 
 	result, _ := gw.Submit(context.Background(), buySignal("forex-pass-001"))
@@ -614,8 +610,7 @@ func TestDefaultExecutability_CoreCryptoPasses(t *testing.T) {
 		return "broker-btc-001", true, nil
 	}
 	gw, _ := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
+		AllowedSources: []string{"test-agent"},
 	})
 
 	sig := aegis.TradeSignal{
@@ -645,8 +640,7 @@ func TestDefaultExecutability_NonCoreCryptoRejected(t *testing.T) {
 		return "", false, nil
 	}
 	gw, _ := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
+		AllowedSources: []string{"test-agent"},
 	})
 
 	// DOGEUSDT is crypto but not in the core-algo list.
@@ -716,7 +710,6 @@ func TestGateway_PanicInPlace_SlotFreed(t *testing.T) {
 
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources:     []string{"test-agent"},
-		AllowedStrategies:  []string{"smc"},
 		ExecutabilityCheck: aegis.AllExecutable,
 	})
 	if err != nil {

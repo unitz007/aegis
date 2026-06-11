@@ -26,9 +26,8 @@ func stubPlace(t *testing.T, wantPlaced bool) aegis.PlaceFunc {
 func defaultGW(t *testing.T, place aegis.PlaceFunc) aegis.Gateway {
 	t.Helper()
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
-		MinRR:             1.5,
+		AllowedSources: []string{"test-agent"},
+		MinRR:          1.5,
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
@@ -80,26 +79,29 @@ func TestAllowlist_RejectsUnknownSource(t *testing.T) {
 	}
 }
 
-func TestAllowlist_RejectsUnknownStrategy(t *testing.T) {
-	gw := defaultGW(t, stubPlace(t, false))
-	sig := buySignal("sig-003")
-	sig.Strategy = "some-other-strategy"
-	result, err := gw.Submit(context.Background(), sig)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Accepted {
-		t.Error("expected Accepted=false for unknown strategy")
-	}
-	if result.Code != aegis.ReasonValidation {
-		t.Errorf("expected ReasonValidation, got %q", result.Code)
+// TestAllowlist_AcceptsArbitraryStrategy verifies that strategy is free-text:
+// any non-empty strategy string (including novel experiment names) is accepted
+// end-to-end. SOURCE validation is the real auth boundary — strategy is provenance.
+func TestAllowlist_AcceptsArbitraryStrategy(t *testing.T) {
+	for _, strat := range []string{"topdown", "some_experiment_v3", "zone_internal", "my-new-algo"} {
+		t.Run(strat, func(t *testing.T) {
+			gw := defaultGW(t, stubPlace(t, true))
+			sig := buySignal("sig-arbitrary-" + strat)
+			sig.Strategy = strat
+			result, err := gw.Submit(context.Background(), sig)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Accepted {
+				t.Errorf("arbitrary strategy %q should be accepted, got: %s", strat, result.Reason)
+			}
+		})
 	}
 }
 
 func TestAllowlist_EmptySourcesRejectsAll(t *testing.T) {
 	gw, err := aegis.NewGateway(stubPlace(t, true), aegis.GatewayConfig{
-		AllowedSources:    []string{},
-		AllowedStrategies: []string{"smc"},
+		AllowedSources: []string{},
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
@@ -110,17 +112,23 @@ func TestAllowlist_EmptySourcesRejectsAll(t *testing.T) {
 	}
 }
 
-func TestAllowlist_EmptyStrategiesRejectsAll(t *testing.T) {
-	gw, err := aegis.NewGateway(stubPlace(t, true), aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{},
-	})
+// TestAllowlist_UnknownSourceRejected_AnyStrategyAccepted: unknown SOURCE is still
+// rejected even when an arbitrary strategy string is supplied. Source is the only
+// auth boundary; strategy is free-text provenance.
+func TestAllowlist_UnknownSourceRejected_AnyStrategyAccepted(t *testing.T) {
+	gw := defaultGW(t, stubPlace(t, false))
+	sig := buySignal("sig-005")
+	sig.Source = "rogue-agent"
+	sig.Strategy = "topdown" // arbitrary strategy
+	result, err := gw.Submit(context.Background(), sig)
 	if err != nil {
-		t.Fatalf("NewGateway: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	result, _ := gw.Submit(context.Background(), buySignal("sig-005"))
 	if result.Accepted {
-		t.Error("empty AllowedStrategies should reject all")
+		t.Error("unknown source must still be rejected regardless of strategy")
+	}
+	if result.Code != aegis.ReasonValidation {
+		t.Errorf("expected ReasonValidation, got %q", result.Code)
 	}
 }
 
@@ -410,8 +418,7 @@ func TestExecutabilityCheck_PreReservationReject(t *testing.T) {
 		return "", false, nil
 	}
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources:    []string{"test-agent"},
-		AllowedStrategies: []string{"smc"},
+		AllowedSources: []string{"test-agent"},
 		ExecutabilityCheck: func(symbol, _ string) (bool, string) {
 			if strings.HasPrefix(symbol, "BLOCKED") {
 				return false, "symbol is on the denylist"

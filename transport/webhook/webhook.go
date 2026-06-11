@@ -63,9 +63,9 @@ func WithSourceTag(tag string) Option {
 	return func(c *config) { c.source = tag }
 }
 
-// WithDefaultStrategy sets the strategy used when the request body omits the
-// strategy field. Default: "smc_engine". The gateway still validates it against
-// its AllowedStrategies list.
+// WithDefaultStrategy sets the strategy stamped on every webhook-submitted signal
+// when the request body omits the strategy field. Default: "smc_engine".
+// Strategy is free-text provenance — it is never validated by the gateway.
 func WithDefaultStrategy(s string) Option {
 	return func(c *config) { c.defaultStrategy = s }
 }

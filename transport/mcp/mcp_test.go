@@ -20,12 +20,11 @@ import (
 // stubGateway is an in-memory Gateway stub. It NEVER reaches a real broker or
 // network — it records each submitted signal and returns a canned verdict.
 type stubGateway struct {
-	mu         sync.Mutex
-	calls      []aegis.TradeSignal
-	res        aegis.SignalResult
-	err        error
-	callCnt    int
-	strategies []string
+	mu      sync.Mutex
+	calls   []aegis.TradeSignal
+	res     aegis.SignalResult
+	err     error
+	callCnt int
 }
 
 func (s *stubGateway) Submit(_ context.Context, sig aegis.TradeSignal) (aegis.SignalResult, error) {
@@ -34,12 +33,6 @@ func (s *stubGateway) Submit(_ context.Context, sig aegis.TradeSignal) (aegis.Si
 	s.callCnt++
 	s.calls = append(s.calls, sig)
 	return s.res, s.err
-}
-
-func (s *stubGateway) AllowedStrategies() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.strategies
 }
 
 func (s *stubGateway) count() int {
@@ -94,8 +87,8 @@ func decodeResult(t *testing.T, res *mcpgo.CallToolResult) map[string]any {
 	return out
 }
 
-func newStubGateway(strategies []string, res aegis.SignalResult, err error) *stubGateway {
-	return &stubGateway{strategies: strategies, res: res, err: err}
+func newStubGateway(_ []string, res aegis.SignalResult, err error) *stubGateway {
+	return &stubGateway{res: res, err: err}
 }
 
 func defaultConfig(source string) *config {
@@ -215,21 +208,36 @@ func TestPlaceTrade_MissingRequiredArgDoesNotSubmit(t *testing.T) {
 	}
 }
 
-func TestPlaceTrade_BadStrategyRejectedBeforeSubmit(t *testing.T) {
-	gw := newStubGateway([]string{"smc_engine", "zone_internal"}, aegis.SignalResult{}, nil)
+// TestPlaceTrade_ArbitraryStrategyAccepted: strategy is free-text provenance.
+// Any non-empty string must pass through to the gateway without pre-rejection.
+func TestPlaceTrade_ArbitraryStrategyAccepted(t *testing.T) {
+	gw := newStubGateway(nil, aegis.SignalResult{
+		Accepted: true, Placed: true, BrokerOrderID: "BRK-XYZ", Code: aegis.ReasonPlaced,
+	}, nil)
 	h := placeTradeHandler(gw, defaultConfig("claude"), nil)
 
-	args := validArgs()
-	args["strategy"] = "bogus_strategy"
-	res, err := h(context.Background(), callReq(args))
-	if err != nil {
-		t.Fatalf("unexpected transport error: %v", err)
-	}
-	if !res.IsError {
-		t.Fatalf("invalid strategy should be an error result")
-	}
-	if gw.count() != 0 {
-		t.Fatalf("gateway must not be called for invalid strategy, got %d", gw.count())
+	for _, strat := range []string{"bogus_strategy", "topdown", "some_experiment_v3", "my-new-algo"} {
+		gw.mu.Lock()
+		gw.callCnt = 0
+		gw.calls = nil
+		gw.mu.Unlock()
+
+		args := validArgs()
+		args["strategy"] = strat
+		res, err := h(context.Background(), callReq(args))
+		if err != nil {
+			t.Fatalf("unexpected transport error for strategy %q: %v", strat, err)
+		}
+		if res.IsError {
+			t.Fatalf("arbitrary strategy %q must not be an error result", strat)
+		}
+		if gw.count() != 1 {
+			t.Fatalf("gateway must be called once for strategy %q, got %d", strat, gw.count())
+		}
+		sig := gw.last()
+		if sig.Strategy != strat {
+			t.Errorf("strategy %q not passed through to gateway, got %q", strat, sig.Strategy)
+		}
 	}
 }
 
@@ -400,11 +408,10 @@ func TestHandler_WithSourceTagOption(t *testing.T) {
 	}
 }
 
-func TestHandler_AllowedStrategiesFromGateway(t *testing.T) {
-	// Gateway reports allowed strategies; Handler should use them to populate the
-	// tool schema. We verify AllowedStrategies is called (indirectly, via the
-	// handler being non-nil for a configured gateway).
-	gw := newStubGateway([]string{"smc_engine", "zone_internal"}, aegis.SignalResult{}, nil)
+func TestHandler_StrategyFreeText_HandlerNonNil(t *testing.T) {
+	// Strategy is free-text: Handler builds without any strategy allowlist.
+	// Verify it is non-nil for a configured gateway.
+	gw := newStubGateway(nil, aegis.SignalResult{}, nil)
 	h := Handler("tok", gw, nil)
 	if h == nil {
 		t.Error("Handler should return non-nil handler")
