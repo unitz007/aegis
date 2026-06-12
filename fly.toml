@@ -16,7 +16,7 @@ primary_region = "lhr"
   cpus = 1
 
 [env]
-  BROKER_MODE       = "paper"
+  BROKER_MODE       = "capital"
   ALLOWED_SOURCES   = "finos"
   MIN_RR            = "2.0"
   RISK_PCT          = "0.01"
