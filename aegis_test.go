@@ -652,3 +652,260 @@ func TestPaperBroker_AmendTrade(t *testing.T) {
 	}
 }
 
+// ── Manual signal tests ───────────────────────────────────────────────────────
+
+// manualGW returns a gateway configured with MinRR=2.0 and a single allowed
+// source "finos" — matching the production aegis-exec default — so manual-path
+// tests run against realistic settings.
+func manualGW(t *testing.T, place aegis.PlaceFunc) aegis.Gateway {
+	t.Helper()
+	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
+		AllowedSources:     []string{"finos"},
+		MinRR:              2.0,
+		ExecutabilityCheck: aegis.AllExecutable, // focus the tests on the manual gates
+	})
+	if err != nil {
+		t.Fatalf("manualGW: NewGateway: %v", err)
+	}
+	return gw
+}
+
+// manualBuySignal builds a BUY signal with RR ≈ 1.2 (below the 2.0 MinRR floor)
+// from source "finos". Setting Manual=true should cause this to be accepted;
+// leaving it false should cause rejection.
+func manualBuySignal(id string, manual bool) aegis.TradeSignal {
+	// entry=1.0850, sl=1.0820 (30 pip stop), tp=1.0886 (36 pip target) → RR ≈ 1.2
+	return aegis.TradeSignal{
+		Source:     "finos",
+		Strategy:   "manual_discretionary",
+		SignalID:   id,
+		Symbol:     "EURUSD",
+		Direction:  "BUY",
+		OrderType:  "limit",
+		Entry:      1.0850,
+		StopLoss:   1.0820,
+		TakeProfit: 1.0886,
+		Timestamp:  time.Now().Unix(),
+		Manual:     manual,
+	}
+}
+
+// TestManual_LowRR_Accepted: Manual=true with RR below MinRR must be accepted
+// (RR floor bypassed for manual signals).
+func TestManual_LowRR_Accepted(t *testing.T) {
+	gw := manualGW(t, stubPlaceSource(t, "finos", true))
+	result, err := gw.Submit(context.Background(), manualBuySignal("manual-rr-ok-001", true))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Accepted {
+		t.Errorf("Manual=true with low RR must be accepted, got: %s (code=%s)", result.Reason, result.Code)
+	}
+	if result.Code != aegis.ReasonPlaced {
+		t.Errorf("expected ReasonPlaced, got %q", result.Code)
+	}
+}
+
+// TestManual_LowRR_NonManual_Rejected: regression guard — Manual=false with the
+// same low-RR levels must still be rejected by the RR floor.
+func TestManual_LowRR_NonManual_Rejected(t *testing.T) {
+	gw := manualGW(t, stubPlaceSource(t, "finos", false))
+	result, err := gw.Submit(context.Background(), manualBuySignal("manual-rr-reject-001", false))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Accepted {
+		t.Error("Manual=false with low RR must be rejected (RR floor active)")
+	}
+	if result.Code != aegis.ReasonValidation {
+		t.Errorf("expected ReasonValidation, got %q", result.Code)
+	}
+	if !strings.Contains(result.Reason, "RR") {
+		t.Errorf("expected reason to mention RR, got: %q", result.Reason)
+	}
+}
+
+// TestManual_BadStructure_Rejected: Manual=true with stop on wrong side of entry
+// must be rejected (structural checks still enforced).
+func TestManual_BadStructure_Rejected(t *testing.T) {
+	gw := manualGW(t, stubPlaceSource(t, "finos", false))
+	sig := aegis.TradeSignal{
+		Source:     "finos",
+		Strategy:   "manual_discretionary",
+		SignalID:   "manual-bad-struct-001",
+		Symbol:     "EURUSD",
+		Direction:  "BUY",
+		OrderType:  "limit",
+		Entry:      1.0850,
+		StopLoss:   1.0880, // ABOVE entry for a BUY — structurally invalid
+		TakeProfit: 1.0920,
+		Timestamp:  time.Now().Unix(),
+		Manual:     true,
+	}
+	result, err := gw.Submit(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Accepted {
+		t.Error("Manual=true with stop above entry (BUY) must be rejected — structural check still applies")
+	}
+	if result.Code != aegis.ReasonValidation {
+		t.Errorf("expected ReasonValidation, got %q", result.Code)
+	}
+}
+
+// TestManual_UnknownSource_Rejected: Manual=true from an unknown source must
+// still be rejected — the allowlist is not bypassed.
+func TestManual_UnknownSource_Rejected(t *testing.T) {
+	gw := manualGW(t, stubPlaceSource(t, "finos", false))
+	sig := manualBuySignal("manual-badsrc-001", true)
+	sig.Source = "rogue-agent" // not in AllowedSources
+	result, err := gw.Submit(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Accepted {
+		t.Error("Manual=true from unknown source must be rejected — source allowlist still enforced")
+	}
+	if result.Code != aegis.ReasonValidation {
+		t.Errorf("expected ReasonValidation, got %q", result.Code)
+	}
+}
+
+// TestManual_ZeroEntry_Rejected: Manual=true with entry<=0 must be rejected
+// (basic level validity still enforced).
+func TestManual_ZeroEntry_Rejected(t *testing.T) {
+	gw := manualGW(t, stubPlaceSource(t, "finos", false))
+	sig := manualBuySignal("manual-zero-entry-001", true)
+	sig.Entry = 0
+	result, err := gw.Submit(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Accepted {
+		t.Error("Manual=true with entry=0 must be rejected — level validity still enforced")
+	}
+	if result.Code != aegis.ReasonValidation {
+		t.Errorf("expected ReasonValidation, got %q", result.Code)
+	}
+}
+
+// TestManual_SessionBypass: a Manual signal submitted during Asian session hours
+// for a non-Asian pair (e.g. EURUSD at 03:00 UTC) must be placed. This test
+// wires the executor directly with StockAISessionGate to verify the bypass.
+//
+// Session bypass wiring: intent.Manual=true causes innerExecute to skip the
+// `e.sessionOK(...)` call unconditionally. The gate is still registered on the
+// Executor (StockAISessionGate); it is simply not invoked for manual intents.
+func TestManual_SessionBypass(t *testing.T) {
+	pb := paper.New(10_000, nil)
+
+	// sessionGate that always returns false — simulates a hard Asian-session veto
+	// for any symbol. A non-manual intent would be blocked; a manual one must pass.
+	alwaysVeto := func(_, _ string, _ time.Time) bool { return false }
+
+	ex := &aegis.Executor{
+		Broker:      pb,
+		RiskPct:     0.01,
+		SessionGate: alwaysVeto,
+	}
+
+	intent := aegis.OrderIntent{
+		Symbol:     "EURUSD",
+		AssetClass: "forex",
+		Direction:  "BUY",
+		OrderType:  "limit",
+		EntryPrice: 1.0850,
+		StopLoss:   1.0820,
+		TakeProfit: 1.0886,
+		Confidence: 60,
+		Manual:     true, // must bypass the always-veto session gate
+	}
+
+	_, placed, err := ex.ExecuteWithResult(context.Background(), intent, "manual-session-bypass-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !placed {
+		t.Error("Manual=true must bypass session veto — trade must be placed even when gate returns false")
+	}
+
+	// Sanity check: same intent without Manual=false IS vetoed.
+	intent.Manual = false
+	intent2 := intent
+	_, placed2, err2 := ex.ExecuteWithResult(context.Background(), intent2, "manual-session-veto-002")
+	if err2 != nil {
+		t.Fatalf("unexpected error on non-manual: %v", err2)
+	}
+	if placed2 {
+		t.Error("Manual=false must be vetoed by the always-veto session gate")
+	}
+}
+
+// TestManual_ConfidenceBypass: a Manual signal with confidence below MinConfidence
+// for a non-algo pair must still be placed.
+func TestManual_ConfidenceBypass(t *testing.T) {
+	pb := paper.New(10_000, nil)
+
+	ex := &aegis.Executor{
+		Broker:        pb,
+		RiskPct:       0.01,
+		MinConfidence: 80,
+		// IsAlgoPair: nil → DefaultIsAlgoPair → crypto is NOT algo, confidence applies.
+	}
+
+	// Crypto intent with confidence below MinConfidence.
+	intent := aegis.OrderIntent{
+		Symbol:     "BTCUSD",
+		AssetClass: "crypto",
+		Direction:  "BUY",
+		OrderType:  "limit",
+		EntryPrice: 50_000,
+		StopLoss:   49_000,
+		TakeProfit: 53_000,
+		Confidence: 30, // below MinConfidence=80
+		Manual:     true,
+	}
+
+	// Need dealing rules for crypto.
+	pb.DealingRules["BTCUSD"] = broker.DealingRules{MinDealSize: 0.001, MaxDealSize: 5.0}
+
+	_, placed, err := ex.ExecuteWithResult(context.Background(), intent, "manual-conf-bypass-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !placed {
+		t.Error("Manual=true must bypass confidence gate — trade must be placed even with confidence=30")
+	}
+
+	// Sanity: same intent without Manual is confidence-gated.
+	intent.Manual = false
+	pb2 := paper.New(10_000, nil)
+	pb2.DealingRules["BTCUSD"] = broker.DealingRules{MinDealSize: 0.001, MaxDealSize: 5.0}
+	ex2 := &aegis.Executor{
+		Broker:        pb2,
+		RiskPct:       0.01,
+		MinConfidence: 80,
+	}
+	_, placed2, err2 := ex2.ExecuteWithResult(context.Background(), intent, "manual-conf-veto-002")
+	if err2 != nil {
+		t.Fatalf("unexpected error on non-manual confidence test: %v", err2)
+	}
+	if placed2 {
+		t.Error("Manual=false with confidence=30 below MinConfidence=80 must be skipped")
+	}
+}
+
+// stubPlaceSource is like stubPlace but for a specific source. The source
+// parameter is unused in the stub (the gateway stamps source before calling
+// PlaceFunc), but is kept for clarity of intent.
+func stubPlaceSource(t *testing.T, _ string, wantPlaced bool) aegis.PlaceFunc {
+	t.Helper()
+	return func(_ context.Context, _ aegis.OrderIntent, _ string) (string, bool, error) {
+		if wantPlaced {
+			return "broker-manual-001", true, nil
+		}
+		return "", false, nil
+	}
+}
+

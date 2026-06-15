@@ -41,6 +41,12 @@ type TradeSignal struct {
 	TakeProfit float64 `json:"take_profit"`
 	Note       string  `json:"note"`
 	Timestamp  int64   `json:"timestamp"` // unix seconds
+	// Manual=true marks a human-placed discretionary trade. aegis will SIZE and
+	// PLACE the order but will BYPASS the RR floor, session veto, and confidence
+	// gate. Structural validity (direction-consistent levels, entry/stop/tp > 0)
+	// and idempotency still apply. The source allowlist is also still enforced —
+	// Manual is a bypass flag, not an authentication mechanism.
+	Manual bool `json:"manual,omitempty"`
 }
 
 // SignalReasonCode is a stable, machine-readable verdict classification.
@@ -99,6 +105,10 @@ type OrderIntent struct {
 	// Confidence is used by the executor only when IsAlgoPair returns false
 	// (LLM-sourced decisions). Gateway-submitted signals default to 60.
 	Confidence int
+	// Manual=true bypasses the session veto and confidence gate in the executor.
+	// It is propagated from TradeSignal.Manual. The RR floor is bypassed at the
+	// gateway (validateSignal) before OrderIntent is constructed.
+	Manual bool
 	// ReasonText is a single audit string surfaced in the trade journal.
 	ReasonText string
 }
@@ -296,6 +306,7 @@ func (g *signalGateway) Submit(ctx context.Context, sig TradeSignal) (SignalResu
 		Source:     sig.Source,
 		Strategy:   sig.Strategy,
 		Confidence: 60, // default for gateway-submitted signals
+		Manual:     sig.Manual,
 		ReasonText: sig.Note,
 	}
 
@@ -391,19 +402,21 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 		}
 	}
 
-	// RR floor.
-	slDist := sig.Entry - sig.StopLoss
-	if slDist < 0 {
-		slDist = -slDist
-	}
-	tpDist := sig.TakeProfit - sig.Entry
-	if tpDist < 0 {
-		tpDist = -tpDist
-	}
-	if slDist > 0 {
-		rr := tpDist / slDist
-		if rr < g.cfg.MinRR {
-			return reject(fmt.Sprintf("RR %.2f below minimum %.2f", rr, g.cfg.MinRR))
+	// RR floor — skipped for manual signals (human discretion owns the R:R decision).
+	if !sig.Manual {
+		slDist := sig.Entry - sig.StopLoss
+		if slDist < 0 {
+			slDist = -slDist
+		}
+		tpDist := sig.TakeProfit - sig.Entry
+		if tpDist < 0 {
+			tpDist = -tpDist
+		}
+		if slDist > 0 {
+			rr := tpDist / slDist
+			if rr < g.cfg.MinRR {
+				return reject(fmt.Sprintf("RR %.2f below minimum %.2f", rr, g.cfg.MinRR))
+			}
 		}
 	}
 

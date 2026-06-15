@@ -243,8 +243,10 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 	assetClass := intent.AssetClass
 
 	// ── Algo-pair / confidence gate ───────────────────────────────────────────
+	// Manual signals bypass the confidence gate — the human placing the trade
+	// owns the conviction decision. The gate is also skipped for algo pairs.
 	isAlgo := e.isAlgoPair(sym, assetClass)
-	if !isAlgo && intent.Confidence < e.minConfidence() {
+	if !intent.Manual && !isAlgo && intent.Confidence < e.minConfidence() {
 		log.Printf("executor: %s confidence %d below minimum %d — skip", sym, intent.Confidence, e.minConfidence())
 		return "", false, nil
 	}
@@ -326,7 +328,9 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 	}
 
 	// ── Session gate ──────────────────────────────────────────────────────────
-	if !e.sessionOK(sym, assetClass, time.Now().UTC()) {
+	// Manual signals bypass the session veto — the human has consciously chosen
+	// to place outside the preferred session window.
+	if !intent.Manual && !e.sessionOK(sym, assetClass, time.Now().UTC()) {
 		log.Printf("executor: %s outside session window — defer", sym)
 		return "", false, nil
 	}

@@ -94,6 +94,10 @@ type signalRequest struct {
 	// source. The handler always stamps the configured source below.
 	Strategy string `json:"strategy"`
 	Note     string `json:"note"`
+	// Manual=true marks a human-placed discretionary trade. When set, the gateway
+	// bypasses the RR floor, and the executor bypasses the session veto and
+	// confidence gate. Structural validity and the source allowlist still apply.
+	Manual bool `json:"manual,omitempty"`
 }
 
 // handler is the concrete webhook http.Handler.
@@ -238,6 +242,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		TakeProfit: req.TakeProfit,
 		Note:       req.Note,
 		Timestamp:  req.Timestamp,
+		Manual:     req.Manual,
 	}
 
 	// ── Submit to the gateway (single business path) ──────────────────────────
