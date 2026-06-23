@@ -47,6 +47,12 @@ type TradeSignal struct {
 	// and idempotency still apply. The source allowlist is also still enforced —
 	// Manual is a bypass flag, not an authentication mechanism.
 	Manual bool `json:"manual,omitempty"`
+	// RiskMult is an optional per-signal position-size multiplier. The executor
+	// computes: effectiveRiskPct = baseRiskPct * RiskMult, capped at 5% to
+	// prevent runaway size from a bad multiplier. Absent / ≤0 → treated as 1.0
+	// (no change); backward-compatible with producers that do not send the field.
+	// Manual signals are not expected to carry this field.
+	RiskMult float64 `json:"risk_mult,omitempty"`
 }
 
 // SignalReasonCode is a stable, machine-readable verdict classification.
@@ -109,6 +115,10 @@ type OrderIntent struct {
 	// It is propagated from TradeSignal.Manual. The RR floor is bypassed at the
 	// gateway (validateSignal) before OrderIntent is constructed.
 	Manual bool
+	// RiskMult carries the per-signal sizing multiplier from the signal producer.
+	// Propagated from TradeSignal.RiskMult. The executor applies it at the
+	// SizeForex/SizeCrypto call; 0 / absent → treated as 1.0.
+	RiskMult float64
 	// ReasonText is a single audit string surfaced in the trade journal.
 	ReasonText string
 }
@@ -307,6 +317,7 @@ func (g *signalGateway) Submit(ctx context.Context, sig TradeSignal) (SignalResu
 		Strategy:   sig.Strategy,
 		Confidence: 60, // default for gateway-submitted signals
 		Manual:     sig.Manual,
+		RiskMult:   sig.RiskMult,
 		ReasonText: sig.Note,
 	}
 

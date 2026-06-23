@@ -117,6 +117,145 @@ func (s *stubBroker) MarketDealingRules(_ context.Context, _ string) (broker.Dea
 	return s.dealingRulesResp, s.dealingRulesErr
 }
 
+// ── RiskMult sizing tests ─────────────────────────────────────────────────────
+
+// TestExecutor_RiskMult_ScalesUnits verifies that intent.RiskMult=1.5 causes
+// the executor to size ~1.5× more units than the same intent with RiskMult=0.
+// Uses a paper broker so PlaceTrade actually records what was sent.
+func TestExecutor_RiskMult_ScalesUnits(t *testing.T) {
+	// Reference: base sizing (RiskMult=0 → effectiveRiskPct = e.RiskPct).
+	pbBase := paper.New(10_000, nil)
+	exBase := &aegis.Executor{Broker: pbBase, RiskPct: 0.01}
+	baseIntent := forexIntent("EURUSD", "BUY") // entry=1.0850 sl=1.0820 → slDist≈0.003
+	baseIntent.RiskMult = 0                    // absent / default
+	_, _, err := exBase.ExecuteWithResult(context.Background(), baseIntent, "dec-base")
+	if err != nil {
+		t.Fatalf("base ExecuteWithResult: %v", err)
+	}
+	baseTrades, _ := pbBase.OpenOrders(context.Background())
+	if len(baseTrades) == 0 {
+		t.Fatal("expected limit order placed on paper broker")
+	}
+	baseUnits := baseTrades[0].Units
+	if baseUnits == 0 {
+		t.Fatal("base units must not be zero")
+	}
+
+	// Elevated: RiskMult=1.5 → effectiveRiskPct = 0.01 * 1.5 = 0.015.
+	pbHigh := paper.New(10_000, nil)
+	exHigh := &aegis.Executor{Broker: pbHigh, RiskPct: 0.01}
+	highIntent := forexIntent("EURUSD", "BUY")
+	highIntent.RiskMult = 1.5
+	_, _, err = exHigh.ExecuteWithResult(context.Background(), highIntent, "dec-high")
+	if err != nil {
+		t.Fatalf("high ExecuteWithResult: %v", err)
+	}
+	highOrders, _ := pbHigh.OpenOrders(context.Background())
+	if len(highOrders) == 0 {
+		t.Fatal("expected limit order placed on paper broker (high)")
+	}
+	highUnits := highOrders[0].Units
+	if highUnits == 0 {
+		t.Fatal("high units must not be zero")
+	}
+
+	// Allow up to 2 units of rounding error (math.Round on the ratio).
+	wantHigh := int(float64(baseUnits)*1.5 + 0.5)
+	diff := highUnits - wantHigh
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 2 {
+		t.Errorf("RiskMult=1.5 produced %d units, want ≈%d (1.5 × %d base); diff=%d",
+			highUnits, wantHigh, baseUnits, diff)
+	}
+}
+
+// TestExecutor_RiskMult_Zero_IdenticalToBase verifies that RiskMult=0 (absent)
+// produces the exact same unit count as a signal with no RiskMult field.
+func TestExecutor_RiskMult_Zero_IdenticalToBase(t *testing.T) {
+	ctx := context.Background()
+
+	placeWith := func(mult float64) int {
+		pb := paper.New(10_000, nil)
+		ex := &aegis.Executor{Broker: pb, RiskPct: 0.01}
+		intent := forexIntent("EURUSD", "BUY")
+		intent.RiskMult = mult
+		if _, _, err := ex.ExecuteWithResult(ctx, intent, "dec-mult-"+fmt.Sprint(mult)); err != nil {
+			t.Fatalf("ExecuteWithResult (mult=%.2f): %v", mult, err)
+		}
+		orders, _ := pb.OpenOrders(ctx)
+		if len(orders) == 0 {
+			t.Fatalf("expected order placed (mult=%.2f)", mult)
+		}
+		return orders[0].Units
+	}
+
+	unitsZero := placeWith(0)
+	unitsExplicit1 := placeWith(1.0)
+	if unitsZero != unitsExplicit1 {
+		t.Errorf("RiskMult=0 produced %d units, RiskMult=1.0 produced %d — must be identical",
+			unitsZero, unitsExplicit1)
+	}
+}
+
+// TestExecutor_RiskMult_Cap enforces that even a very large multiplier cannot
+// exceed maxEffectiveRiskPct=5%. Uses balance=10000, RiskPct=3%, mult=2.0
+// (would be 6% uncapped; expected to clamp to 5%).
+func TestExecutor_RiskMult_Cap(t *testing.T) {
+	ctx := context.Background()
+
+	// At RiskPct=0.03 and mult=2.0, uncapped effectiveRiskPct would be 0.06 > 0.05.
+	pb := paper.New(10_000, nil)
+	ex := &aegis.Executor{Broker: pb, RiskPct: 0.03}
+	intent := forexIntent("EURUSD", "BUY")
+	intent.RiskMult = 2.0 // would give 6% — must be capped at 5%
+	if _, _, err := ex.ExecuteWithResult(ctx, intent, "dec-cap"); err != nil {
+		t.Fatalf("ExecuteWithResult (cap test): %v", err)
+	}
+	orders, _ := pb.OpenOrders(ctx)
+	if len(orders) == 0 {
+		t.Fatal("expected order placed in cap test")
+	}
+	cappedUnits := orders[0].Units
+
+	// Reference: explicit 5% (should produce identical units to the capped 6%).
+	pb5 := paper.New(10_000, nil)
+	ex5 := &aegis.Executor{Broker: pb5, RiskPct: 0.05}
+	intent5 := forexIntent("EURUSD", "BUY")
+	intent5.RiskMult = 0 // use base 5% directly
+	if _, _, err := ex5.ExecuteWithResult(ctx, intent5, "dec-5pct"); err != nil {
+		t.Fatalf("ExecuteWithResult (5pct reference): %v", err)
+	}
+	orders5, _ := pb5.OpenOrders(ctx)
+	if len(orders5) == 0 {
+		t.Fatal("expected order placed in 5pct reference")
+	}
+	refUnits := orders5[0].Units
+
+	// Allow 1 unit of rounding difference.
+	diff := cappedUnits - refUnits
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 1 {
+		t.Errorf("cap test: mult=2.0 on RiskPct=3%% produced %d units; "+
+			"capped 5%% reference produced %d units; diff=%d (want ≤1)",
+			cappedUnits, refUnits, diff)
+	}
+	// Also ensure the uncapped 6% would have been bigger.
+	pb6 := paper.New(10_000, nil)
+	ex6 := &aegis.Executor{Broker: pb6, RiskPct: 0.06}
+	intent6 := forexIntent("EURUSD", "BUY")
+	intent6.RiskMult = 0
+	ex6.ExecuteWithResult(ctx, intent6, "dec-6pct") //nolint:errcheck
+	orders6, _ := pb6.OpenOrders(ctx)
+	if len(orders6) > 0 && orders6[0].Units <= cappedUnits {
+		t.Errorf("sanity: 6%% units (%d) should exceed capped 5%% units (%d)",
+			orders6[0].Units, cappedUnits)
+	}
+}
+
 // stubStore records SaveClosedTrade calls.
 type stubStore struct {
 	mu           sync.Mutex
