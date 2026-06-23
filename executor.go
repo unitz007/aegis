@@ -341,6 +341,21 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 		return "", false, fmt.Errorf("executor: account fetch: %w", err)
 	}
 
+	// ── Effective risk percent (per-signal multiplier) ────────────────────────
+	// RiskMult ≤ 0 means absent/default → treat as 1.0 (no change).
+	// Cap at maxEffectiveRiskPct to prevent a rogue/buggy multiplier from
+	// blowing up position size.
+	const maxEffectiveRiskPct = 0.05 // 5% hard ceiling
+	effectiveRiskPct := e.RiskPct
+	if intent.RiskMult > 0 {
+		effectiveRiskPct = e.RiskPct * intent.RiskMult
+		if effectiveRiskPct > maxEffectiveRiskPct {
+			log.Printf("executor: %s risk_mult=%.3f would produce effectiveRiskPct=%.4f — capped at %.2f",
+				sym, intent.RiskMult, effectiveRiskPct, maxEffectiveRiskPct)
+			effectiveRiskPct = maxEffectiveRiskPct
+		}
+	}
+
 	// ── Position sizing ───────────────────────────────────────────────────────
 	req := broker.TradeRequest{
 		Symbol:     sym,
@@ -363,7 +378,7 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 	case "crypto":
 		// Safety invariant #2: Capital.com crypto CFD "size" is in base-asset
 		// units, not USD notional. SizeCrypto uses the correct formula.
-		qty, err := SizeCrypto(account.Balance, e.RiskPct, intent.EntryPrice, intent.StopLoss)
+		qty, err := SizeCrypto(account.Balance, effectiveRiskPct, intent.EntryPrice, intent.StopLoss)
 		if err != nil {
 			log.Printf("executor: %s crypto sizing error: %v — skip", sym, err)
 			return "", false, nil
@@ -397,7 +412,7 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 
 	default: // forex and stocks
 		factor, _ := e.quoteFactor(ctx, sym, intent.EntryPrice)
-		units, err := SizeForex(account.Balance, e.RiskPct, intent.EntryPrice, intent.StopLoss, factor)
+		units, err := SizeForex(account.Balance, effectiveRiskPct, intent.EntryPrice, intent.StopLoss, factor)
 		if err != nil {
 			log.Printf("executor: %s forex sizing error: %v — skip", sym, err)
 			return "", false, nil

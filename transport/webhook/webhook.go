@@ -98,6 +98,9 @@ type signalRequest struct {
 	// bypasses the RR floor, and the executor bypasses the session veto and
 	// confidence gate. Structural validity and the source allowlist still apply.
 	Manual bool `json:"manual,omitempty"`
+	// RiskMult is an optional per-signal sizing multiplier forwarded to the
+	// executor. Absent / ≤0 is treated as 1.0 by the executor (no change).
+	RiskMult float64 `json:"risk_mult,omitempty"`
 }
 
 // handler is the concrete webhook http.Handler.
@@ -243,6 +246,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Note:       req.Note,
 		Timestamp:  req.Timestamp,
 		Manual:     req.Manual,
+		RiskMult:   req.RiskMult,
 	}
 
 	// ── Submit to the gateway (single business path) ──────────────────────────
