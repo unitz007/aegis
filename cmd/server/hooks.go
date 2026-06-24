@@ -1,9 +1,32 @@
 package main
 
 import (
+	"log"
+	"os"
 	"strings"
 	"time"
 )
+
+// asianGateLateOnly controls which window is blocked for non-Asian forex pairs.
+//
+//   - false (default, env unset / "full"): CURRENT behaviour — block 00:00–07:00
+//     AND 21:00–24:00 UTC (the original full Asian-session gate).
+//   - true (env FOREX_ASIAN_GATE="late_only"): SURGICAL behaviour — block ONLY
+//     21:00–24:00 UTC; the 00:00–07:00 window is fully allowed (validated by
+//     walk-forward backtest: unblocking that window improves ExpR/return/drawdown).
+//
+// Read once at process start; tests may set this var directly and defer-restore.
+var asianGateLateOnly = parseAsianGateMode(os.Getenv("FOREX_ASIAN_GATE"))
+
+// parseAsianGateMode parses the FOREX_ASIAN_GATE env value.
+// Anything other than "late_only" (case-insensitive) → false (full mode, safe default).
+func parseAsianGateMode(val string) bool {
+	if strings.EqualFold(strings.TrimSpace(val), "late_only") {
+		log.Printf("session_gate: FOREX_ASIAN_GATE=late_only — 00:00–07:00 UTC unblocked, 21:00–24:00 still gated")
+		return true
+	}
+	return false
+}
 
 // StockAISessionGate is an aegis.SessionGateFunc that replicates the Asian-session
 // execution guard from StockAI trade_executor.go (lines 155–165) and
@@ -22,7 +45,15 @@ func StockAISessionGate(symbol, assetClass string, now time.Time) bool {
 		return true // crypto and stocks trade 24/7
 	}
 	hour := now.UTC().Hour()*60 + now.UTC().Minute()
-	isAsian := hour < 7*60 || hour >= 21*60
+	var isAsian bool
+	if asianGateLateOnly {
+		// Surgical mode: only the 21:00–24:00 window is gated.
+		// 00:00–07:00 is fully allowed (walk-forward validated).
+		isAsian = hour >= 21*60
+	} else {
+		// Full mode (default): block 00:00–07:00 AND 21:00–24:00 UTC.
+		isAsian = hour < 7*60 || hour >= 21*60
+	}
 	if !isAsian {
 		return true // London / NY / overlap — always execute
 	}
