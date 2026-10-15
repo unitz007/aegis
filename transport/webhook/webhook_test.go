@@ -450,3 +450,157 @@ func TestVerifyHMAC_TamperedBody(t *testing.T) {
 		t.Error("expected false for tampered body")
 	}
 }
+
+// ── Per-request accounts ──────────────────────────────────────────────────────
+
+type ctxKey struct{}
+
+// ctxGateway records the context and signal it was handed.
+type ctxGateway struct {
+	ctx context.Context
+	sig aegis.TradeSignal
+}
+
+func (g *ctxGateway) Submit(ctx context.Context, sig aegis.TradeSignal) (aegis.SignalResult, error) {
+	g.ctx, g.sig = ctx, sig
+	return aegis.SignalResult{Accepted: true, Placed: true, BrokerOrderID: "B1"}, nil
+}
+
+func post(h http.Handler, body map[string]any) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/signal/trade", bytes.NewReader(raw))
+	req.Header.Set("X-Signature", "sha256="+signBody(testSecret, raw))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func resolver(ctx context.Context, raw json.RawMessage) (context.Context, string, error) {
+	var a struct {
+		ID, Password string
+	}
+	_ = json.Unmarshal(raw, &a)
+	if a.ID == "" {
+		return nil, "", fmt.Errorf("account id missing")
+	}
+	if a.ID == "bad" {
+		return nil, "", fmt.Errorf("unsupported account %q", a.ID)
+	}
+	return context.WithValue(ctx, ctxKey{}, a.ID), "acct-" + a.ID, nil
+}
+
+func TestAccount_RoutedAndNamespaced(t *testing.T) {
+	gw := &ctxGateway{}
+	h := Handler(testSecret, gw, WithSourceTag("finos"), WithAccountResolver(resolver))
+	body := validBody()
+	body["account"] = map[string]any{"id": "u1", "password": "hunter2"}
+	rec := post(h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := gw.sig.SignalID; got != "acct-u1:sig-webhook-001" {
+		t.Errorf("signal id not namespaced per account: %q", got)
+	}
+	if gw.ctx.Value(ctxKey{}) != "u1" {
+		t.Errorf("the account's context did not reach the gateway")
+	}
+}
+
+func TestAccount_RejectedWhenNotEnabled(t *testing.T) {
+	gw := &stubGateway{res: aegis.SignalResult{Accepted: true}}
+	h := Handler(testSecret, gw, WithSourceTag("finos")) // no resolver
+	body := validBody()
+	body["account"] = map[string]any{"id": "u1"}
+	rec := post(h, body)
+	if rec.Code != http.StatusBadRequest || gw.count() != 0 {
+		t.Fatalf("want 400 and no gateway call, got %d calls=%d body=%s", rec.Code, gw.count(), rec.Body)
+	}
+}
+
+func TestAccount_ResolverErrorRejectsWithoutSecrets(t *testing.T) {
+	gw := &stubGateway{res: aegis.SignalResult{Accepted: true}}
+	h := Handler(testSecret, gw, WithSourceTag("finos"), WithAccountResolver(resolver))
+	body := validBody()
+	body["account"] = map[string]any{"id": "bad", "password": "hunter2"}
+	rec := post(h, body)
+	if rec.Code != http.StatusBadRequest || gw.count() != 0 {
+		t.Fatalf("want 400 and no gateway call, got %d calls=%d", rec.Code, gw.count())
+	}
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Errorf("response leaked the password: %s", rec.Body)
+	}
+}
+
+func TestAccount_AbsentLeavesExistingBehaviour(t *testing.T) {
+	gw := &ctxGateway{}
+	h := Handler(testSecret, gw, WithSourceTag("finos"), WithAccountResolver(resolver))
+	rec := post(h, validBody())
+	if rec.Code != http.StatusOK || gw.sig.SignalID != "sig-webhook-001" || gw.ctx.Value(ctxKey{}) != nil {
+		t.Fatalf("a request without an account must behave exactly as before: code=%d id=%q", rec.Code, gw.sig.SignalID)
+	}
+	body := validBody()
+	body["account"] = nil // explicit null counts as absent
+	if rec := post(h, body); rec.Code != http.StatusOK {
+		t.Errorf("null account: status %d", rec.Code)
+	}
+}
+
+func TestAccount_DifferentAccountsDoNotShareSignalIDs(t *testing.T) {
+	gw := &ctxGateway{}
+	h := Handler(testSecret, gw, WithSourceTag("finos"), WithAccountResolver(resolver))
+	ids := map[string]bool{}
+	for _, u := range []string{"u1", "u2"} {
+		body := validBody()
+		body["account"] = map[string]any{"id": u}
+		post(h, body)
+		ids[gw.sig.SignalID] = true
+	}
+	if len(ids) != 2 {
+		t.Errorf("same signal_id from two accounts must map to two distinct ids, got %v", ids)
+	}
+}
+
+// ── Account check ─────────────────────────────────────────────────────────────
+
+func postCheck(h http.Handler, secret string, body map[string]any) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/account/check", bytes.NewReader(raw))
+	req.Header.Set("X-Signature", "sha256="+signBody(secret, raw))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestAccountCheck(t *testing.T) {
+	var checked context.Context
+	check := func(ctx context.Context) (any, error) {
+		checked = ctx
+		if ctx.Value(ctxKey{}) == "broken" {
+			return nil, fmt.Errorf("login failed for hunter2")
+		}
+		return map[string]any{"currency": "USD"}, nil
+	}
+	h := AccountCheckHandler(testSecret, resolver, check)
+	now := time.Now().Unix()
+
+	if rec := postCheck(h, testSecret, map[string]any{"timestamp": now, "account": map[string]any{"id": "u1"}}); rec.Code != 200 ||
+		!strings.Contains(rec.Body.String(), `"ok":true`) || !strings.Contains(rec.Body.String(), "USD") || checked.Value(ctxKey{}) != "u1" {
+		t.Errorf("good account: %d %s", rec.Code, rec.Body)
+	}
+	if rec := postCheck(h, "wrong-secret", map[string]any{"timestamp": now, "account": map[string]any{"id": "u1"}}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("bad signature: %d", rec.Code)
+	}
+	if rec := postCheck(h, testSecret, map[string]any{"timestamp": now - 3600, "account": map[string]any{"id": "u1"}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("stale timestamp: %d", rec.Code)
+	}
+	if rec := postCheck(h, testSecret, map[string]any{"timestamp": now}); rec.Code != http.StatusBadRequest {
+		t.Errorf("missing account: %d", rec.Code)
+	}
+	rec := postCheck(h, testSecret, map[string]any{"timestamp": now, "account": map[string]any{"id": "broken"}})
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "hunter2") {
+		t.Errorf("broker failure must be 502 and leak nothing: %d %s", rec.Code, rec.Body)
+	}
+	if rec := postCheck(AccountCheckHandler("", resolver, check), "", map[string]any{"timestamp": now, "account": map[string]any{"id": "u1"}}); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no secret must fail closed: %d", rec.Code)
+	}
+}

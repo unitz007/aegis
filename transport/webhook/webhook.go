@@ -45,6 +45,7 @@ type config struct {
 	defaultStrategy    string
 	bodyLimit          int64
 	logger             *log.Logger
+	accountResolver    AccountResolver
 }
 
 // Option configures the webhook handler.
@@ -80,6 +81,19 @@ func WithLogger(l *log.Logger) Option {
 	return func(c *config) { c.logger = l }
 }
 
+// AccountResolver turns the optional "account" object of a signed request into
+// the context the trade runs under (typically carrying that account's broker)
+// and a stable, non-secret account key. The key namespaces idempotency so two
+// accounts can never collide on a signal_id. Return an error to reject the
+// request; its text is returned to the caller, so it must never contain secrets.
+type AccountResolver func(ctx context.Context, raw json.RawMessage) (context.Context, string, error)
+
+// WithAccountResolver enables per-request accounts. Without it, a request that
+// carries an "account" is rejected rather than silently using the default broker.
+func WithAccountResolver(r AccountResolver) Option {
+	return func(c *config) { c.accountResolver = r }
+}
+
 // signalRequest is the JSON body expected from external callers.
 type signalRequest struct {
 	SignalID   string  `json:"signal_id"`
@@ -101,6 +115,10 @@ type signalRequest struct {
 	// RiskMult is an optional per-signal sizing multiplier forwarded to the
 	// executor. Absent / ≤0 is treated as 1.0 by the executor (no change).
 	RiskMult float64 `json:"risk_mult,omitempty"`
+	// Account optionally names the broker account to trade on (provider-specific
+	// JSON, interpreted by the AccountResolver). Absent → the server's default
+	// broker, so existing producers are unaffected.
+	Account json.RawMessage `json:"account,omitempty"`
 }
 
 // handler is the concrete webhook http.Handler.
@@ -253,6 +271,28 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Per-request account: resolved before the gateway so the broker travels in
+	// the context, and the id is namespaced so idempotency is per account.
+	if hasAccount(req.Account) {
+		if h.cfg.accountResolver == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"accepted": false,
+				"reason":   "per-account trading is not enabled on this server",
+			})
+			return
+		}
+		acctCtx, key, aerr := h.cfg.accountResolver(pCtx, req.Account)
+		if aerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"accepted": false,
+				"reason":   fmt.Sprintf("invalid account: %v", aerr),
+			})
+			return
+		}
+		pCtx = acctCtx
+		sig.SignalID = key + ":" + sig.SignalID
+	}
+
 	res, gwErr := h.gateway.Submit(pCtx, sig)
 	if gwErr != nil {
 		// Submit only returns a non-nil error for unexpected internal faults;
@@ -319,4 +359,76 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func hasAccount(raw json.RawMessage) bool {
+	t := strings.TrimSpace(string(raw))
+	return t != "" && t != "null"
+}
+
+// AccountCheckFunc inspects the account resolved from a request (for example,
+// confirming the credentials work) and returns a JSON-serialisable summary.
+type AccountCheckFunc func(ctx context.Context) (any, error)
+
+// AccountCheckHandler returns the signed POST handler used to verify an account
+// before trading on it. Body: {"timestamp": <unix>, "account": {...}}, signed
+// exactly like the trade webhook. It never places an order.
+func AccountCheckHandler(secret string, resolve AccountResolver, check AccountCheckFunc, opts ...Option) http.Handler {
+	cfg := config{
+		timestampTolerance: defaultTimestampTolerance,
+		bodyLimit:          defaultBodyLimit,
+		logger:             log.Default(),
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "reason": "method not allowed; POST required"})
+			return
+		}
+		if secret == "" || resolve == nil || check == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": "account check disabled"})
+			return
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, cfg.bodyLimit))
+		if err != nil || int64(len(raw)) == cfg.bodyLimit {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "reason": "invalid request body"})
+			return
+		}
+		if !verifyHMAC([]byte(secret), raw, strings.TrimPrefix(r.Header.Get("X-Signature"), "sha256=")) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "reason": "invalid signature"})
+			return
+		}
+		var req struct {
+			Timestamp int64           `json:"timestamp"`
+			Account   json.RawMessage `json:"account"`
+		}
+		if json.Unmarshal(raw, &req) != nil || !hasAccount(req.Account) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "reason": "account is required"})
+			return
+		}
+		age := time.Since(time.Unix(req.Timestamp, 0))
+		if age < 0 {
+			age = -age
+		}
+		if age > cfg.timestampTolerance {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "reason": "timestamp out of tolerance window"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		ctx, _, err = resolve(ctx, req.Account)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "reason": fmt.Sprintf("invalid account: %v", err)})
+			return
+		}
+		info, err := check(ctx)
+		if err != nil {
+			cfg.logger.Printf("webhook: account check failed: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "reason": "the broker rejected these credentials or could not be reached"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": info})
+	})
 }

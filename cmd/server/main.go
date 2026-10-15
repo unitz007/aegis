@@ -126,7 +126,16 @@ func main() {
 	}
 
 	// ── Gateway ───────────────────────────────────────────────────────────────────
+	// Per-request broker accounts: a signed request may carry its own broker
+	// credentials (e.g. one per end user). Live accounts need ALLOW_ACCOUNT_LIVE=true.
+	allowAccountLive := strings.EqualFold(os.Getenv("ALLOW_ACCOUNT_LIVE"), "true")
+	accts := newAccounts(*exec, allowAccountLive)
+	log.Printf("server: per-request accounts enabled (capital demo%s)", map[bool]string{true: " + live", false: " only; set ALLOW_ACCOUNT_LIVE=true for live"}[allowAccountLive])
+
 	placeFunc := func(ctx context.Context, intent aegis.OrderIntent, decisionID string) (string, bool, error) {
+		if acctExec, ok := executorFrom(ctx); ok {
+			return acctExec.ExecuteWithResult(ctx, intent, decisionID)
+		}
 		return exec.ExecuteWithResult(ctx, intent, decisionID)
 	}
 
@@ -150,8 +159,12 @@ func main() {
 		webhook.WithSourceTag(allowedSources[0]),
 		webhook.WithDefaultStrategy("smc_engine"),
 		webhook.WithTimestampTolerance(60*time.Second),
+		webhook.WithAccountResolver(accts.resolve),
 	)
 	mux.Handle("/signal/trade", whHandler)
+
+	// /account/check — signed; proves an account's credentials work (never trades)
+	mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.check))
 
 	// /mcp/ — MCP Streamable-HTTP bearer-auth
 	mcpHandler := aegismcp.Handler(

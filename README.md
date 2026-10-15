@@ -176,6 +176,22 @@ curl -X POST https://host/signal/trade \
   -H "X-Signature: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"
 ```
 
+### Per-request broker accounts (webhook)
+
+One aegis server can trade for many people, each on their own broker account. A signed webhook request may carry an optional `account` object; aegis then sizes and places the trade on **that** account, using its balance, instead of the server's default broker. Requests without `account` behave exactly as before.
+
+```json
+{ "signal_id": "sig-001", "timestamp": 1733580000, "symbol": "EURUSD", "direction": "BUY",
+  "order_type": "limit", "entry": 1.0850, "stop_loss": 1.0810, "take_profit": 1.0910,
+  "account": { "provider": "capital", "env": "demo", "api_key": "…", "email": "…", "password": "…" } }
+```
+
+- Credentials are held in memory only (one adapter per account, so the broker session is reused). They are never logged or returned in errors.
+- Idempotency is namespaced per account, so two accounts can reuse a `signal_id`.
+- `env: "live"` is refused unless the server runs with `ALLOW_ACCOUNT_LIVE=true`.
+- `POST /account/check` (same signature scheme, body `{"timestamp": …, "account": {…}}`) logs in and returns `{"ok": true, "account": {"currency", "balance", "env"}}` without placing anything. Use it to verify credentials before trading.
+- The account object travels inside the signed body; always use HTTPS.
+
 ## The injected-hooks model
 
 Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a standalone default that is used when the field is nil. The **security-critical** defaults fail closed: `ExecutabilityCheck` rejects out-of-universe symbols (no accidental equity orders to a CFD broker) and `QuoteConverter` prevents silent mis-sizing. The `SessionGate` and `IsAlgoPair` defaults are **permissive** (trade any session; treat forex as algo-driven) — inject your own to restrict.
