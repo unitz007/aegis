@@ -1,55 +1,68 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/unitz007/aegis"
 	"github.com/unitz007/aegis/broker"
-	"github.com/unitz007/aegis/broker/capital"
+	"github.com/unitz007/aegis/sealed"
 )
 
-// accountSpec is the broker account a signed request wants to trade on. The
-// caller (e.g. closed-kael) holds each user's credentials and sends them with
-// the request; aegis keeps them in memory only, never on disk or in logs.
+// accountSpec is the broker account a signed request wants to trade on.
+//
+// The sender names the broker, which must be one aegis has registered, and the
+// environment. The login details travel sealed to aegis's public key, so they
+// are never readable in the request body, in logs or by anything in between.
+// aegis opens them here, in memory only, and never stores or logs them.
 type accountSpec struct {
-	Provider string `json:"provider"` // "capital"
-	Env      string `json:"env"`      // "demo" | "live"
-	APIKey   string `json:"api_key"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Broker      string `json:"broker"`      // a registered broker, e.g. "capital"
+	Env         string `json:"env"`         // one of that broker's environments, e.g. "demo" | "live"
+	Credentials string `json:"credentials"` // base64 of the login details sealed to aegis's public key
+}
+
+// sealContext ties a sealed login to the broker and environment it was sealed
+// for, so demo details can never be replayed against live, or one broker's
+// against another.
+func sealContext(brokerName, env string) []byte {
+	return []byte("aegis/account/v1|" + brokerName + "|" + env)
 }
 
 type accountEntry struct {
 	exec     *aegis.Executor
-	passHash [sha256.Size]byte
+	credHash [sha256.Size]byte
 	used     time.Time
 }
 
 // accounts resolves per-request broker accounts into ready Executors. It keeps
-// one adapter per account so Capital's session (login) is reused across trades.
+// one connection per account so the broker session (login) is reused across trades.
 type accounts struct {
-	template  aegis.Executor // risk %, gates and hooks shared by every account
-	allowLive bool           // master switch: live accounts are refused unless set
+	template  aegis.Executor // gates and hooks shared by every account
+	registry  *broker.Registry
+	private   []byte // aegis's private key, for opening sealed logins
+	allowLive bool   // master switch: live accounts are refused unless set
 	maxSize   int
-	newBroker func(s accountSpec) broker.Port // overridable in tests
 
 	mu    sync.Mutex
 	cache map[string]*accountEntry
 }
 
-func newAccounts(template aegis.Executor, allowLive bool) *accounts {
+func newAccounts(template aegis.Executor, registry *broker.Registry, private []byte, allowLive bool) *accounts {
 	return &accounts{
 		template:  template,
+		registry:  registry,
+		private:   private,
 		allowLive: allowLive,
 		maxSize:   200,
-		newBroker: func(s accountSpec) broker.Port { return capital.New(s.Env, s.APIKey, s.Email, s.Password) },
 		cache:     make(map[string]*accountEntry),
 	}
 }
@@ -62,48 +75,120 @@ func executorFrom(ctx context.Context) (*aegis.Executor, bool) {
 	return e, ok
 }
 
-// resolve implements webhook.AccountResolver. Errors are returned to the caller,
-// so they never contain credentials.
+// resolve implements webhook.AccountResolver. Errors go back to the caller, so
+// they never contain credentials.
 func (a *accounts) resolve(ctx context.Context, raw json.RawMessage) (context.Context, string, error) {
 	var s accountSpec
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil, "", fmt.Errorf("account must be a JSON object")
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields() // a stray plaintext field (api_key, password…) is refused, not ignored
+	if err := dec.Decode(&s); err != nil {
+		return nil, "", fmt.Errorf("account must be {broker, env, credentials}")
 	}
-	s.Provider = strings.ToLower(strings.TrimSpace(s.Provider))
+	s.Broker = strings.ToLower(strings.TrimSpace(s.Broker))
 	s.Env = strings.ToLower(strings.TrimSpace(s.Env))
-	s.APIKey, s.Email = strings.TrimSpace(s.APIKey), strings.TrimSpace(s.Email)
-	if s.Provider != "capital" {
-		return nil, "", fmt.Errorf("unsupported provider (only capital)")
+
+	spec, ok := a.registry.Get(s.Broker)
+	if !ok {
+		return nil, "", fmt.Errorf("broker is not registered (available: %s)", strings.Join(a.registry.Names(), ", "))
 	}
-	if s.Env != "demo" && s.Env != "live" {
-		return nil, "", fmt.Errorf("env must be demo or live")
-	}
-	if s.APIKey == "" || s.Email == "" || s.Password == "" {
-		return nil, "", fmt.Errorf("api_key, email and password are required")
+	if !spec.HasEnv(s.Env) {
+		return nil, "", fmt.Errorf("env must be one of: %s", strings.Join(spec.Envs, ", "))
 	}
 	if s.Env == "live" && !a.allowLive {
 		return nil, "", fmt.Errorf("live accounts are disabled on this server")
 	}
+	if s.Credentials == "" {
+		return nil, "", fmt.Errorf("credentials are required (sealed to aegis's public key)")
+	}
 
-	sum := sha256.Sum256([]byte(s.Provider + "|" + s.Env + "|" + s.APIKey + "|" + s.Email))
-	key := hex.EncodeToString(sum[:8])
-	passHash := sha256.Sum256([]byte(s.Password))
+	blob, err := base64.StdEncoding.DecodeString(s.Credentials)
+	if err != nil {
+		return nil, "", fmt.Errorf("credentials must be base64")
+	}
+	plain, err := sealed.Open(a.private, sealContext(s.Broker, s.Env), blob)
+	if err != nil {
+		return nil, "", fmt.Errorf("credentials could not be opened (sealed for another key, broker or env?)")
+	}
+	creds, err := parseCredentials(spec, plain)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// The key names the account without containing any secret. It also namespaces
+	// duplicate-signal protection, so two accounts never collide on a signal id.
+	key := accountKey(spec, s.Env, creds)
+	credHash := hashCredentials(creds)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e := a.cache[key]
-	if e == nil || e.passHash != passHash {
+	if e == nil || e.credHash != credHash {
 		if e == nil && len(a.cache) >= a.maxSize {
 			a.evictOldestLocked()
 		}
-		exec := a.template // copy: shared settings, this account's broker
-		exec.Broker = a.newBroker(s)
-		exec.BrokerName = "capital:" + s.Env
-		e = &accountEntry{exec: &exec, passHash: passHash}
+		port, err := spec.New(s.Env, creds)
+		if err != nil {
+			return nil, "", fmt.Errorf("could not connect to %s", spec.Name)
+		}
+		exec := a.template // copy: shared gates, this account's broker
+		exec.Broker = port
+		exec.BrokerName = spec.Name + ":" + s.Env
+		e = &accountEntry{exec: &exec, credHash: credHash}
 		a.cache[key] = e
 	}
 	e.used = time.Now()
 	return context.WithValue(ctx, execCtxKey{}, e.exec), key, nil
+}
+
+// parseCredentials reads the opened details and holds them to what the broker
+// asks for: every field present, nothing extra.
+func parseCredentials(spec broker.Spec, plain []byte) (broker.Credentials, error) {
+	var creds broker.Credentials
+	dec := json.NewDecoder(bytes.NewReader(plain))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&creds); err != nil {
+		return nil, fmt.Errorf("credentials must be a JSON object of the broker's login fields")
+	}
+	allowed := map[string]bool{}
+	for _, f := range spec.Fields {
+		allowed[f] = true
+		if strings.TrimSpace(creds[f]) == "" {
+			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.Fields, ", "))
+		}
+	}
+	for f := range creds {
+		if !allowed[f] {
+			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.Fields, ", "))
+		}
+		creds[f] = strings.TrimSpace(creds[f])
+	}
+	return creds, nil
+}
+
+func accountKey(spec broker.Spec, env string, creds broker.Credentials) string {
+	parts := []string{spec.Name, env}
+	for _, f := range spec.Identity {
+		parts = append(parts, creds[f])
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(sum[:8])
+}
+
+// hashCredentials covers every field, so a changed password rebuilds the
+// connection while the account (and its key) stays the same.
+func hashCredentials(creds broker.Credentials) [sha256.Size]byte {
+	names := make([]string, 0, len(creds))
+	for k := range creds {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, k := range names {
+		fmt.Fprintf(h, "%s=%d:%s;", k, len(creds[k]), creds[k])
+	}
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 func (a *accounts) evictOldestLocked() {
@@ -131,6 +216,6 @@ func (a *accounts) check(ctx context.Context) (any, error) {
 	return map[string]any{
 		"currency": acct.Currency,
 		"balance":  acct.Balance,
-		"env":      strings.TrimPrefix(e.BrokerName, "capital:"),
+		"env":      e.BrokerName[strings.Index(e.BrokerName, ":")+1:],
 	}, nil
 }

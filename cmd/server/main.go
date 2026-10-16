@@ -117,11 +117,27 @@ func main() {
 	}
 
 	// ── Gateway ───────────────────────────────────────────────────────────────────
-	// Per-request broker accounts: a signed request may carry its own broker
-	// credentials (e.g. one per end user). Live accounts need ALLOW_ACCOUNT_LIVE=true.
+	// Per-request broker accounts: a signed request names a registered broker and
+	// carries that account's login sealed to aegis's public key (ACCOUNT_SEAL_KEY
+	// holds the private half). Without the key the feature is off and any request
+	// naming an account is refused. Live accounts need ALLOW_ACCOUNT_LIVE=true.
 	allowAccountLive := strings.EqualFold(os.Getenv("ALLOW_ACCOUNT_LIVE"), "true")
-	accts := newAccounts(*exec, allowAccountLive)
-	log.Printf("server: per-request accounts enabled (capital demo%s)", map[bool]string{true: " + live", false: " only; set ALLOW_ACCOUNT_LIVE=true for live"}[allowAccountLive])
+	registry, err := brokerRegistry()
+	if err != nil {
+		log.Fatalf("server: broker registry: %v", err)
+	}
+	sealPrivate, sealPublic, err := loadSealKey(os.Getenv("ACCOUNT_SEAL_KEY"))
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
+	var accts *accounts
+	if sealPrivate != nil {
+		accts = newAccounts(*exec, registry, sealPrivate, allowAccountLive)
+		log.Printf("server: per-request accounts enabled (brokers=%v%s)", registry.Names(),
+			map[bool]string{true: ", live allowed", false: ", demo only; set ALLOW_ACCOUNT_LIVE=true for live"}[allowAccountLive])
+	} else {
+		log.Printf("server: per-request accounts disabled (ACCOUNT_SEAL_KEY not set)")
+	}
 
 	placeFunc := func(ctx context.Context, intent aegis.OrderIntent, decisionID string) (string, bool, error) {
 		if acctExec, ok := executorFrom(ctx); ok {
@@ -144,18 +160,24 @@ func main() {
 	mux := http.NewServeMux()
 
 	// /signal/trade — HMAC-signed webhook POST
-	whHandler := webhook.Handler(
-		webhookSecret,
-		gw,
+	whOpts := []webhook.Option{
 		webhook.WithSourceTag(allowedSources[0]),
 		webhook.WithDefaultStrategy("smc_engine"),
-		webhook.WithTimestampTolerance(60*time.Second),
-		webhook.WithAccountResolver(accts.resolve),
-	)
-	mux.Handle("/signal/trade", whHandler)
+		webhook.WithTimestampTolerance(60 * time.Second),
+	}
+	if accts != nil {
+		whOpts = append(whOpts, webhook.WithAccountResolver(accts.resolve))
+	}
+	mux.Handle("/signal/trade", webhook.Handler(webhookSecret, gw, whOpts...))
 
 	// /account/check — signed; proves an account's credentials work (never trades)
-	mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.check))
+	// /account/key   — public; the key senders seal broker logins to
+	if accts != nil {
+		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.check))
+		mux.Handle("/account/key", keyHandler(sealPublic))
+	} else {
+		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+	}
 
 	// /mcp/ — MCP Streamable-HTTP bearer-auth
 	mcpHandler := aegismcp.Handler(

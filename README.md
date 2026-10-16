@@ -177,19 +177,22 @@ curl -X POST https://host/signal/trade \
 
 ### Per-request broker accounts (webhook)
 
-One aegis server can trade for many people, each on their own broker account. A signed webhook request may carry an optional `account` object; aegis then places the trade on **that** account instead of the server's default broker. Requests without `account` behave exactly as before.
+One aegis server can trade for many people, each on their own broker account. A signed webhook request may carry an `account` object that names the broker and carries that account's login, **sealed** so nothing in between can read it. aegis opens it, trades, and answers with the usual `SignalResult`. Requests without `account` use the server's default broker.
 
 ```json
 { "signal_id": "sig-001", "timestamp": 1733580000, "symbol": "EURUSD", "direction": "BUY",
   "order_type": "limit", "entry": 1.0850, "stop_loss": 1.0810, "take_profit": 1.0910, "size": 10000,
-  "account": { "provider": "capital", "env": "demo", "api_key": "…", "email": "…", "password": "…" } }
+  "account": { "broker": "capital", "env": "demo", "credentials": "<base64 sealed login>" } }
 ```
 
-- Credentials are held in memory only (one adapter per account, so the broker session is reused). They are never logged or returned in errors.
-- Idempotency is namespaced per account, so two accounts can reuse a `signal_id`.
-- `env: "live"` is refused unless the server runs with `ALLOW_ACCOUNT_LIVE=true`.
-- `POST /account/check` (same signature scheme, body `{"timestamp": …, "account": {…}}`) logs in and returns `{"ok": true, "account": {"currency", "balance", "env"}}` without placing anything. Use it to verify credentials before trading.
-- The account object travels inside the signed body; always use HTTPS.
+- **`broker` must be registered.** Only brokers listed in the server's registry (`brokerRegistry()` in `cmd/server/wiring.go`; today `capital`) can be named. Anything else is refused with the list of what is available.
+- **`env`** must be one of that broker's environments (`demo` or `live`). `live` is refused unless the server runs with `ALLOW_ACCOUNT_LIVE=true`.
+- **`credentials`** is the login (for Capital.com: `{"api_key", "email", "password"}`) as JSON, sealed to aegis's public key and base64 encoded. Every field the broker needs must be present and nothing extra. A login sent in the clear, or any stray plaintext field next to `credentials`, is refused.
+- **Sealing.** Fetch the key from `GET /account/key` (public, safe to cache), then use the `sealed` package: `sealed.Seal(publicKey, []byte("aegis/account/v1|"+broker+"|"+env), loginJSON)` with the broker name lower case. The context ties the value to its broker and environment, so demo details can't be replayed as live and one broker's can't be used for another. Scheme: X25519 + HKDF-SHA256 + AES-256-GCM.
+- **Keys.** `go run ./cmd/sealkey` makes a key pair. Set the private half on aegis (`fly secrets set ACCOUNT_SEAL_KEY=...`). Without it the feature is off and any request naming an account is refused.
+- Logins are opened in memory only (one connection per account, so the broker session is reused). They are never stored, logged or returned in errors.
+- Duplicate protection is namespaced per account, so two accounts can reuse a `signal_id`.
+- `POST /account/check` (same signature scheme, body `{"timestamp": …, "account": {…}}`) logs in and returns `{"ok": true, "account": {"currency", "balance", "env"}}` without placing anything. Use it to verify a login before trading.
 
 ## The injected-hooks model
 
