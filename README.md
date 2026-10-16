@@ -2,13 +2,13 @@
 
 **Status: v0.1.0 — first tagged release. The API may still change before v1.0.**
 
-aegis is a standalone, open-source trade-execution safety harness for algorithmic trading systems. It lets any agent or signal producer — whether a language model talking over MCP, a pipeline posting a signed webhook, or in-process Go code — place trades through a pluggable broker adapter, with server-side position sizing, dealing-rules clamping, dedup/idempotency, allowlist-based authentication, and fail-closed safety defaults baked in. aegis defines its own types and imports nothing from any trading-system internals: drop it in, wire your `broker.Port`, populate an `AllowedSources` / `AllowedStrategies` allowlist, and submit `TradeSignal`s.
+aegis is a standalone, open-source trade-execution safety harness for algorithmic trading systems. It lets any agent or signal producer — whether a language model talking over MCP, a pipeline posting a signed webhook, or in-process Go code — place trades through a pluggable broker adapter, with dealing-rules checks, dedup/idempotency, allowlist-based authentication, and fail-closed safety defaults baked in. aegis defines its own types and imports nothing from any trading-system internals: drop it in, wire your `broker.Port`, populate an `AllowedSources` / `AllowedStrategies` allowlist, and submit `TradeSignal`s.
 
 ## Package layout
 
 | Package | Contents |
 |---|---|
-| `github.com/unitz007/aegis` | Root: `Gateway`, `Executor`, `TradeSignal`, `OrderIntent`, `SignalResult`, sizing helpers (`SizeForex`, `SizeCrypto`, `ClampCryptoQuantity`), currency-exposure helpers, `ClassifySymbolDefault`, and the five injected-hook defaults |
+| `github.com/unitz007/aegis` | Root: `Gateway`, `Executor`, `TradeSignal`, `OrderIntent`, `SignalResult`, currency-exposure helpers, `ClassifySymbolDefault`, and the five injected-hook defaults |
 | `github.com/unitz007/aegis/broker` | `Port` interface all broker adapters must satisfy; shared value types (`TradeRequest`, `TradeReceipt`, `OpenTrade`, `OpenOrder`, `BrokerAccount`, `ClosedTrade`); `DealingRulesProvider` optional capability |
 | `github.com/unitz007/aegis/broker/paper` | In-memory `Broker` for tests and simulation; implements `broker.Port` and `broker.DealingRulesProvider`; lazy trigger-fill and auto-exit via optional `QuoteFetcher` |
 | `github.com/unitz007/aegis/transport/mcp` | MCP Streamable-HTTP `Handler` exposing a `place_trade` tool; bearer-token auth (constant-time); fail-closed when `authToken` is empty or gateway is nil |
@@ -36,11 +36,10 @@ func main() {
     // 1. Paper broker — 10 000 USD starting balance, no live quote feed.
     pb := paper.New(10_000, nil)
 
-    // 2. Executor handles sizing, dup-check, session gating, and broker calls.
+    // 2. Executor handles dup-check, session gating, and broker calls.
     exec := &aegis.Executor{
         Broker:     pb,
         BrokerName: "paper",
-        RiskPct:    0.01, // 1% of balance risked per trade
         // All hook fields nil → safe standalone defaults apply (see below).
     }
 
@@ -61,7 +60,7 @@ func main() {
         log.Fatal(err)
     }
 
-    // 4. Submit a signal — validation, idempotency, sizing, and execution in one call.
+    // 4. Submit a signal — validation, idempotency, and execution in one call.
     result, err := gw.Submit(ctx, aegis.TradeSignal{
         Source:     "my-agent",
         Strategy:   "smc",
@@ -122,7 +121,7 @@ http.ListenAndServe(":8080", mux)
 
 ## Protocol reference
 
-Remote producers reach the gateway through one of two transports. Both validate, size server-side, dedup, and return the same `SignalResult`. **The caller never sends position size** — it is computed inside the executor from account balance, `RiskPct`, and the SL distance.
+Remote producers reach the gateway through one of two transports. Both validate, dedup, and return the same `SignalResult`. **The caller always sends the position size** (`size`) and aegis never works one out: it is used exactly as given, or the trade is skipped. Forex and stocks: a whole number of units. Crypto: a quantity of the base asset.
 
 ### MCP — the `place_trade` tool
 
@@ -178,11 +177,11 @@ curl -X POST https://host/signal/trade \
 
 ### Per-request broker accounts (webhook)
 
-One aegis server can trade for many people, each on their own broker account. A signed webhook request may carry an optional `account` object; aegis then sizes and places the trade on **that** account, using its balance, instead of the server's default broker. Requests without `account` behave exactly as before.
+One aegis server can trade for many people, each on their own broker account. A signed webhook request may carry an optional `account` object; aegis then places the trade on **that** account instead of the server's default broker. Requests without `account` behave exactly as before.
 
 ```json
 { "signal_id": "sig-001", "timestamp": 1733580000, "symbol": "EURUSD", "direction": "BUY",
-  "order_type": "limit", "entry": 1.0850, "stop_loss": 1.0810, "take_profit": 1.0910,
+  "order_type": "limit", "entry": 1.0850, "stop_loss": 1.0810, "take_profit": 1.0910, "size": 10000,
   "account": { "provider": "capital", "env": "demo", "api_key": "…", "email": "…", "password": "…" } }
 ```
 
@@ -194,7 +193,7 @@ One aegis server can trade for many people, each on their own broker account. A 
 
 ## The injected-hooks model
 
-Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a standalone default that is used when the field is nil. The **security-critical** defaults fail closed: `ExecutabilityCheck` rejects out-of-universe symbols (no accidental equity orders to a CFD broker) and `QuoteConverter` prevents silent mis-sizing. The `SessionGate` and `IsAlgoPair` defaults are **permissive** (trade any session; treat forex as algo-driven) — inject your own to restrict.
+Four hooks can be injected into `GatewayConfig` (for the gateway layer) and `Executor` (for the execution layer). Every hook has a standalone default that is used when the field is nil. The **security-critical** defaults fail closed: `ExecutabilityCheck` rejects out-of-universe symbols (no accidental equity orders to a CFD broker)  The `SessionGate` and `IsAlgoPair` defaults are **permissive** (trade any session; treat forex as algo-driven) — inject your own to restrict.
 
 | Hook | Type | Where injected | Safe default | Default behaviour |
 |---|---|---|---|---|
@@ -202,19 +201,18 @@ Five hooks can be injected into `GatewayConfig` (for the gateway layer) and `Exe
 | `ExecutabilityCheck` | `func(symbol, assetClass string) (bool, string)` | `GatewayConfig` | `DefaultExecutability` | **Fail-closed.** Accepts only `"forex"` and the 6 core-algo crypto symbols (`BTCUSD`, `ETHUSD`, `SOLUSD`, `BNBUSD`, `XRPUSD`, `ADAUSD`). Stocks and non-core crypto are **rejected before the signal_id slot is consumed**. Inject `AllExecutable` to allow every asset class. |
 | `IsAlgoPair` | `IsAlgoPairFunc` = `func(symbol, assetClass string) bool` | `Executor` | `DefaultIsAlgoPair` | Forex is algo-driven (skips confidence gate); crypto and stocks default to AI-sourced (confidence gate applies). |
 | `SessionGate` | `SessionGateFunc` = `func(symbol, assetClass string, now time.Time) bool` | `Executor` | `AlwaysAllow` | All symbols allowed at all times. Inject a custom gate to restrict trading to London/NY sessions. |
-| `QuoteConverter` | `QuoteConverterFunc` = `func(ctx, symbol, entry) (factor float64, exact bool)` | `Executor` | `DefaultQuoteConverter` | Converts the quote-currency SL distance to account-currency units for forex sizing. Returns `1/entry` for USD-base pairs (e.g. USDJPY) — **corrects the ~150× under-sizing** that `IdentityConverter` causes. Cross pairs use a static rate table (`exact=false`). |
 
 The defaults for `SymbolClassifier` and `ExecutabilityCheck` were chosen to match the hardened gates in production StockAI. `DefaultExecutability` rejects a stock symbol such as `"AAPL"` before calling `PlaceFunc`, so a misconfigured agent cannot accidentally route equity orders to a CFD broker.
 
 ## Safety guarantees
 
-- **Server-side sizing only.** Position size is computed from account balance, `RiskPct`, and the signal's entry/SL levels inside the `Executor`. Signal producers never dictate units or quantity.
+- **No auto sizing.** aegis never decides how big a trade is. The caller's `size` is used exactly as given; a size that is missing, not positive, not a whole number of units (forex/stocks) or outside the broker's crypto limits is skipped, never rounded or adjusted.
 
 - **Dup-check fails closed.** If `Broker.OpenTrades` or `Broker.OpenOrders` returns an error, the executor skips rather than assuming "no positions" and risking duplicate stacking.
 
 - **Idempotency / no-replay.** A `signal_id` is atomically reserved before any broker call. A second submission with the same `(source, signal_id)` returns the cached terminal result without calling the broker. A `PlaceFunc` error finalizes the slot as `ReasonExecutorSkip` so retries return the same outcome instead of re-placing.
 
-- **Dealing-rules clamping for crypto.** The executor type-asserts `broker.DealingRulesProvider` and fetches per-instrument min/max deal sizes. Quantities below `MinDealSize` are skipped; quantities above `MaxDealSize` are clamped. **Never upsized** (upsizing would exceed the configured risk percentage).
+- **Dealing-rules check for crypto.** The executor type-asserts `broker.DealingRulesProvider` and fetches per-instrument min/max deal sizes. A quantity below `MinDealSize` or above `MaxDealSize` is skipped, **never resized**.
 
 - **Flip-close / flip-cancel is terminal.** When an opposite-direction open position or pending order exists, the executor closes/cancels it and returns without opening a new entry. Human-placed orders (`Source == "human"`) are never flip-cancelled.
 

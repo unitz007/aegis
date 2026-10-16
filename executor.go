@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -21,100 +22,15 @@ import (
 type IsAlgoPairFunc func(symbol, assetClass string) bool
 
 // SessionGateFunc returns true when the symbol may be executed right now.
-// Called by the executor after dup-check, before sizing. Returning false defers
+// Called by the executor after dup-check, before the order is built. Returning false defers
 // the trade without consuming the signal_id reservation (the gateway reservation
 // is already committed; only the broker order is withheld).
 //
 // Safe standalone default: AlwaysAllow — always returns true.
 type SessionGateFunc func(symbol, assetClass string, now time.Time) bool
 
-// QuoteConverterFunc returns how many account-currency units equal one unit of
-// the pair's QUOTE currency at the given entry price. Used to convert a
-// quote-currency SL distance to account-currency risk for forex position sizing.
-//
-// Returns (factor, exact) where exact=false signals a static fallback was used.
-// factor must always be > 0.
-//
-// Safe standalone default: IdentityConverter — always returns (1.0, false).
-// This is correct for USD-quoted pairs (EURUSD, GBPUSD, etc.) but ~150× wrong
-// for USD-base pairs like USDJPY. Inject a custom converter for JPY pairs.
-type QuoteConverterFunc func(ctx context.Context, symbol string, entryPrice float64) (factor float64, exact bool)
-
 // AlwaysAllow is the default SessionGateFunc — all symbols are allowed at all times.
 func AlwaysAllow(_, _ string, _ time.Time) bool { return true }
-
-// IdentityConverter is a QuoteConverterFunc that always returns (1.0, false).
-// Correct only for USD-quoted pairs (EURUSD, GBPUSD, etc.). For USD-base pairs
-// such as USDJPY this produces sizing ~150× too small. Use DefaultQuoteConverter
-// as the executor default; inject IdentityConverter only when you genuinely need
-// a hard 1.0 factor for all pairs.
-func IdentityConverter(_ context.Context, _ string, _ float64) (float64, bool) { return 1.0, false }
-
-// DefaultQuoteConverter is the default QuoteConverterFunc. It mirrors the
-// semantics of domain.QuoteToUSD (StockAI pairs.go:159) using only the static
-// rate table — no live broker quote is needed:
-//
-//   - QUOTE == "USD" (e.g. EURUSD, GBPUSD) → factor 1.0, exact=true
-//   - BASE  == "USD" (e.g. USDJPY, USDCHF) → factor 1/entry, exact=true
-//   - Cross pair (no USD leg)               → static table lookup, exact=false
-//   - Non-fiat / unknown                    → 1.0, exact=false (safe default)
-//
-// This corrects the ~150× USDJPY under-sizing that IdentityConverter causes.
-// Callers who need live-rate cross-pair accuracy should inject a custom
-// QuoteConverterFunc that calls the broker's LiveQuote for the cross rate.
-func DefaultQuoteConverter(_ context.Context, symbol string, entryPrice float64) (float64, bool) {
-	return defaultQuoteConvert(symbol, entryPrice)
-}
-
-// defaultQuoteConvert is the pure (non-method) implementation of
-// DefaultQuoteConverter, callable from sizing tests without a context.
-func defaultQuoteConvert(symbol string, entryPrice float64) (float64, bool) {
-	// Normalise: strip separators, upper-case.
-	clean := strings.NewReplacer("/", "", "-", "", "_", "").Replace(strings.ToUpper(strings.TrimSpace(symbol)))
-
-	// We need a 6-letter fiat pair to apply the correction.
-	if len(clean) != 6 {
-		return 1.0, false
-	}
-	base := clean[:3]
-	quote := clean[3:]
-
-	switch {
-	case quote == "USD":
-		return 1.0, true
-	case base == "USD":
-		if entryPrice > 0 {
-			return 1.0 / entryPrice, true
-		}
-	}
-
-	// Cross pair: use static table for the quote leg.
-	if r, ok := staticQuoteUSD[quote]; ok && r > 0 {
-		return r, false
-	}
-	return 1.0, false
-}
-
-// staticQuoteUSD is a coarse "USD per 1 unit of quote currency" table used as a
-// last-resort fallback for cross-pair conversion. Values mirror the StockAI
-// domain.staticQuoteUSD table (pairs.go:121-136) and are intentionally
-// conservative — a live lookup always takes precedence when available.
-var staticQuoteUSD = map[string]float64{
-	"USD": 1.00,
-	"EUR": 1.08,
-	"GBP": 1.27,
-	"JPY": 1.0 / 150.0,
-	"CHF": 1.13,
-	"CAD": 0.73,
-	"AUD": 0.66,
-	"NZD": 0.60,
-	"SEK": 0.095,
-	"NOK": 0.093,
-	"DKK": 0.145,
-	"SGD": 0.74,
-	"HKD": 0.128,
-	"CNY": 0.139,
-}
 
 // DefaultIsAlgoPair is the default IsAlgoPairFunc. Forex is inherently
 // algo-driven in the standalone case; crypto and stocks require confidence gating.
@@ -164,8 +80,8 @@ type LiveTradeRecord struct {
 //   - Flip-close of opposite-direction positions (terminal — no new entry)
 //   - Flip-cancel of opposite-direction pending orders (human orders exempt)
 //   - Session gating via SessionGate hook
-//   - Position sizing via SizeForex / SizeCrypto
-//   - Dealing-rules clamping for crypto (fail-safe: skip if provider unavailable)
+//   - Dealing-rules check of the requested crypto size (fail-safe: skip if provider
+//     unavailable; an out-of-range size is skipped, never resized)
 //   - Currency-exposure cap (optional)
 //   - Trade journal and receipt persistence (both optional)
 //
@@ -176,14 +92,12 @@ type Executor struct {
 	Journal    TradeJournal // optional
 	BrokerName string
 
-	RiskPct          float64 // e.g. 0.01 for 1% risk per trade
 	MinConfidence    int     // minimum confidence for non-algo-pair decisions; default 55
 	MaxCurrencyUnits float64 // per-currency exposure cap; 0 = disabled
 
 	// Hooks — all optional; safe defaults are used when nil.
-	IsAlgoPair      IsAlgoPairFunc
-	SessionGate     SessionGateFunc
-	QuoteConverter  QuoteConverterFunc
+	IsAlgoPair  IsAlgoPairFunc
+	SessionGate SessionGateFunc
 
 	Logger *log.Logger
 }
@@ -207,13 +121,6 @@ func (e *Executor) sessionOK(symbol, assetClass string, now time.Time) bool {
 		return e.SessionGate(symbol, assetClass, now)
 	}
 	return AlwaysAllow(symbol, assetClass, now)
-}
-
-func (e *Executor) quoteFactor(ctx context.Context, symbol string, entryPrice float64) (float64, bool) {
-	if e.QuoteConverter != nil {
-		return e.QuoteConverter(ctx, symbol, entryPrice)
-	}
-	return DefaultQuoteConverter(ctx, symbol, entryPrice)
 }
 
 func (e *Executor) minConfidence() int {
@@ -335,28 +242,9 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 		return "", false, nil
 	}
 
-	// ── Account ───────────────────────────────────────────────────────────────
-	account, err := e.Broker.Account(ctx)
-	if err != nil {
-		return "", false, fmt.Errorf("executor: account fetch: %w", err)
-	}
-
-	// ── Effective risk percent (per-signal multiplier) ────────────────────────
-	// RiskMult ≤ 0 means absent/default → treat as 1.0 (no change).
-	// Cap at maxEffectiveRiskPct to prevent a rogue/buggy multiplier from
-	// blowing up position size.
-	const maxEffectiveRiskPct = 0.05 // 5% hard ceiling
-	effectiveRiskPct := e.RiskPct
-	if intent.RiskMult > 0 {
-		effectiveRiskPct = e.RiskPct * intent.RiskMult
-		if effectiveRiskPct > maxEffectiveRiskPct {
-			log.Printf("executor: %s risk_mult=%.3f would produce effectiveRiskPct=%.4f — capped at %.2f",
-				sym, intent.RiskMult, effectiveRiskPct, maxEffectiveRiskPct)
-			effectiveRiskPct = maxEffectiveRiskPct
-		}
-	}
-
-	// ── Position sizing ───────────────────────────────────────────────────────
+	// ── Order ─────────────────────────────────────────────────────────────────
+	// aegis never decides how big a trade is. The caller's size is used exactly
+	// as asked or the trade is skipped; it is never raised, lowered or rounded.
 	req := broker.TradeRequest{
 		Symbol:     sym,
 		OrderType:  intent.OrderType,
@@ -374,16 +262,16 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 		req.Source = "ai"
 	}
 
+	if intent.Size <= 0 || math.IsNaN(intent.Size) || math.IsInf(intent.Size, 0) {
+		log.Printf("executor: %s no valid size (%v) — skip", sym, intent.Size)
+		return "", false, nil
+	}
+
 	switch assetClass {
 	case "crypto":
 		// Safety invariant #2: Capital.com crypto CFD "size" is in base-asset
-		// units, not USD notional. SizeCrypto uses the correct formula.
-		qty, err := SizeCrypto(account.Balance, effectiveRiskPct, intent.EntryPrice, intent.StopLoss)
-		if err != nil {
-			log.Printf("executor: %s crypto sizing error: %v — skip", sym, err)
-			return "", false, nil
-		}
-
+		// units, not USD notional, so Size is a base-asset quantity here.
+		//
 		// Safety invariant #6: fail-safe if dealing-rules provider is absent or errors.
 		drp, ok := e.Broker.(broker.DealingRulesProvider)
 		if !ok {
@@ -396,13 +284,17 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 			return "", false, nil
 		}
 
-		// Safety invariant #7: clamp skips below minDealSize; never upsizes.
-		clamped, ok := ClampCryptoQuantity(qty, rules.MinDealSize, rules.MaxDealSize)
-		if !ok {
-			log.Printf("executor: %s quantity %.6f below min deal size %.6f — skip", sym, qty, rules.MinDealSize)
+		// Safety invariant #7: a size outside the broker's limits is skipped, not
+		// adjusted — the caller asked for exactly this much risk.
+		if rules.MinDealSize > 0 && intent.Size < rules.MinDealSize {
+			log.Printf("executor: %s size %.6f below min deal size %.6f — skip", sym, intent.Size, rules.MinDealSize)
 			return "", false, nil
 		}
-		req.Quantity = clamped
+		if rules.MaxDealSize > 0 && intent.Size > rules.MaxDealSize {
+			log.Printf("executor: %s size %.6f above max deal size %.6f — skip", sym, intent.Size, rules.MaxDealSize)
+			return "", false, nil
+		}
+		req.Quantity = intent.Size
 		// Sign of Units still determines direction; value is 1 or -1 for crypto.
 		if dir == "BUY" {
 			req.Units = 1
@@ -410,17 +302,12 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 			req.Units = -1
 		}
 
-	default: // forex and stocks
-		factor, _ := e.quoteFactor(ctx, sym, intent.EntryPrice)
-		units, err := SizeForex(account.Balance, effectiveRiskPct, intent.EntryPrice, intent.StopLoss, factor)
-		if err != nil {
-			log.Printf("executor: %s forex sizing error: %v — skip", sym, err)
+	default: // forex and stocks: Size is a whole number of units
+		if intent.Size != math.Trunc(intent.Size) || intent.Size > math.MaxInt32 {
+			log.Printf("executor: %s size %v is not a whole number of units — skip", sym, intent.Size)
 			return "", false, nil
 		}
-		if units == 0 {
-			log.Printf("executor: %s position size rounded to 0 — skip", sym)
-			return "", false, nil
-		}
+		units := int(intent.Size)
 
 		// Currency-exposure cap.
 		if e.MaxCurrencyUnits > 0 {

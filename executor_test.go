@@ -6,8 +6,8 @@ package aegis_test
 //   #1  dup-check fails CLOSED: OpenTrades/OpenOrders error → no PlaceTrade
 //   #2  default executability: stock → gateway rejection before slot consumed;
 //       core-algo crypto + forex pass DefaultExecutability
-//   #3  default converter: USDJPY via DEFAULT path gets ~1/entry factor;
-//       USD-quoted pair gets 1.0
+//   #3  no auto sizing: the caller's size is used exactly as given, or the
+//       trade is skipped (never rounded, raised or lowered)
 //   #5  flip-close is terminal: opposite position → close, no new entry,
 //       ClosedTrade recorded with ExitReason "algo_flip"
 //   #6  dealing-rules lookup error → skip (no unclamped place)
@@ -46,6 +46,7 @@ type stubBroker struct {
 	accountErr  error
 
 	placeCalled int
+	lastReq     broker.TradeRequest
 	placeErr    error
 	placeResp   broker.TradeReceipt
 
@@ -84,6 +85,7 @@ func (s *stubBroker) PlaceTrade(_ context.Context, req broker.TradeRequest) (bro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.placeCalled++
+	s.lastReq = req
 	if s.placeErr != nil {
 		return broker.TradeReceipt{}, s.placeErr
 	}
@@ -115,145 +117,6 @@ func (s *stubBroker) MarketDealingRules(_ context.Context, _ string) (broker.Dea
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dealingRulesResp, s.dealingRulesErr
-}
-
-// ── RiskMult sizing tests ─────────────────────────────────────────────────────
-
-// TestExecutor_RiskMult_ScalesUnits verifies that intent.RiskMult=1.5 causes
-// the executor to size ~1.5× more units than the same intent with RiskMult=0.
-// Uses a paper broker so PlaceTrade actually records what was sent.
-func TestExecutor_RiskMult_ScalesUnits(t *testing.T) {
-	// Reference: base sizing (RiskMult=0 → effectiveRiskPct = e.RiskPct).
-	pbBase := paper.New(10_000, nil)
-	exBase := &aegis.Executor{Broker: pbBase, RiskPct: 0.01}
-	baseIntent := forexIntent("EURUSD", "BUY") // entry=1.0850 sl=1.0820 → slDist≈0.003
-	baseIntent.RiskMult = 0                    // absent / default
-	_, _, err := exBase.ExecuteWithResult(context.Background(), baseIntent, "dec-base")
-	if err != nil {
-		t.Fatalf("base ExecuteWithResult: %v", err)
-	}
-	baseTrades, _ := pbBase.OpenOrders(context.Background())
-	if len(baseTrades) == 0 {
-		t.Fatal("expected limit order placed on paper broker")
-	}
-	baseUnits := baseTrades[0].Units
-	if baseUnits == 0 {
-		t.Fatal("base units must not be zero")
-	}
-
-	// Elevated: RiskMult=1.5 → effectiveRiskPct = 0.01 * 1.5 = 0.015.
-	pbHigh := paper.New(10_000, nil)
-	exHigh := &aegis.Executor{Broker: pbHigh, RiskPct: 0.01}
-	highIntent := forexIntent("EURUSD", "BUY")
-	highIntent.RiskMult = 1.5
-	_, _, err = exHigh.ExecuteWithResult(context.Background(), highIntent, "dec-high")
-	if err != nil {
-		t.Fatalf("high ExecuteWithResult: %v", err)
-	}
-	highOrders, _ := pbHigh.OpenOrders(context.Background())
-	if len(highOrders) == 0 {
-		t.Fatal("expected limit order placed on paper broker (high)")
-	}
-	highUnits := highOrders[0].Units
-	if highUnits == 0 {
-		t.Fatal("high units must not be zero")
-	}
-
-	// Allow up to 2 units of rounding error (math.Round on the ratio).
-	wantHigh := int(float64(baseUnits)*1.5 + 0.5)
-	diff := highUnits - wantHigh
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 2 {
-		t.Errorf("RiskMult=1.5 produced %d units, want ≈%d (1.5 × %d base); diff=%d",
-			highUnits, wantHigh, baseUnits, diff)
-	}
-}
-
-// TestExecutor_RiskMult_Zero_IdenticalToBase verifies that RiskMult=0 (absent)
-// produces the exact same unit count as a signal with no RiskMult field.
-func TestExecutor_RiskMult_Zero_IdenticalToBase(t *testing.T) {
-	ctx := context.Background()
-
-	placeWith := func(mult float64) int {
-		pb := paper.New(10_000, nil)
-		ex := &aegis.Executor{Broker: pb, RiskPct: 0.01}
-		intent := forexIntent("EURUSD", "BUY")
-		intent.RiskMult = mult
-		if _, _, err := ex.ExecuteWithResult(ctx, intent, "dec-mult-"+fmt.Sprint(mult)); err != nil {
-			t.Fatalf("ExecuteWithResult (mult=%.2f): %v", mult, err)
-		}
-		orders, _ := pb.OpenOrders(ctx)
-		if len(orders) == 0 {
-			t.Fatalf("expected order placed (mult=%.2f)", mult)
-		}
-		return orders[0].Units
-	}
-
-	unitsZero := placeWith(0)
-	unitsExplicit1 := placeWith(1.0)
-	if unitsZero != unitsExplicit1 {
-		t.Errorf("RiskMult=0 produced %d units, RiskMult=1.0 produced %d — must be identical",
-			unitsZero, unitsExplicit1)
-	}
-}
-
-// TestExecutor_RiskMult_Cap enforces that even a very large multiplier cannot
-// exceed maxEffectiveRiskPct=5%. Uses balance=10000, RiskPct=3%, mult=2.0
-// (would be 6% uncapped; expected to clamp to 5%).
-func TestExecutor_RiskMult_Cap(t *testing.T) {
-	ctx := context.Background()
-
-	// At RiskPct=0.03 and mult=2.0, uncapped effectiveRiskPct would be 0.06 > 0.05.
-	pb := paper.New(10_000, nil)
-	ex := &aegis.Executor{Broker: pb, RiskPct: 0.03}
-	intent := forexIntent("EURUSD", "BUY")
-	intent.RiskMult = 2.0 // would give 6% — must be capped at 5%
-	if _, _, err := ex.ExecuteWithResult(ctx, intent, "dec-cap"); err != nil {
-		t.Fatalf("ExecuteWithResult (cap test): %v", err)
-	}
-	orders, _ := pb.OpenOrders(ctx)
-	if len(orders) == 0 {
-		t.Fatal("expected order placed in cap test")
-	}
-	cappedUnits := orders[0].Units
-
-	// Reference: explicit 5% (should produce identical units to the capped 6%).
-	pb5 := paper.New(10_000, nil)
-	ex5 := &aegis.Executor{Broker: pb5, RiskPct: 0.05}
-	intent5 := forexIntent("EURUSD", "BUY")
-	intent5.RiskMult = 0 // use base 5% directly
-	if _, _, err := ex5.ExecuteWithResult(ctx, intent5, "dec-5pct"); err != nil {
-		t.Fatalf("ExecuteWithResult (5pct reference): %v", err)
-	}
-	orders5, _ := pb5.OpenOrders(ctx)
-	if len(orders5) == 0 {
-		t.Fatal("expected order placed in 5pct reference")
-	}
-	refUnits := orders5[0].Units
-
-	// Allow 1 unit of rounding difference.
-	diff := cappedUnits - refUnits
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 1 {
-		t.Errorf("cap test: mult=2.0 on RiskPct=3%% produced %d units; "+
-			"capped 5%% reference produced %d units; diff=%d (want ≤1)",
-			cappedUnits, refUnits, diff)
-	}
-	// Also ensure the uncapped 6% would have been bigger.
-	pb6 := paper.New(10_000, nil)
-	ex6 := &aegis.Executor{Broker: pb6, RiskPct: 0.06}
-	intent6 := forexIntent("EURUSD", "BUY")
-	intent6.RiskMult = 0
-	ex6.ExecuteWithResult(ctx, intent6, "dec-6pct") //nolint:errcheck
-	orders6, _ := pb6.OpenOrders(ctx)
-	if len(orders6) > 0 && orders6[0].Units <= cappedUnits {
-		t.Errorf("sanity: 6%% units (%d) should exceed capped 5%% units (%d)",
-			orders6[0].Units, cappedUnits)
-	}
 }
 
 // stubStore records SaveClosedTrade calls.
@@ -293,6 +156,7 @@ func forexIntent(sym, dir string) aegis.OrderIntent {
 		EntryPrice: entry,
 		StopLoss:   sl,
 		TakeProfit: tp,
+		Size:       10000,
 		Confidence: 60,
 	}
 }
@@ -306,6 +170,7 @@ func cryptoIntent(sym, dir string) aegis.OrderIntent {
 		EntryPrice: 50_000,
 		StopLoss:   49_000,
 		TakeProfit: 53_000,
+		Size:       0.05,
 		Confidence: 60,
 	}
 }
@@ -317,8 +182,7 @@ func TestExecutor_DupCheck_OpenTradesError_NoPlace(t *testing.T) {
 		openTradesErr: errors.New("broker session expired"),
 	}
 	ex := &aegis.Executor{
-		Broker:  sb,
-		RiskPct: 0.01,
+		Broker: sb,
 	}
 
 	_, placed, err := ex.ExecuteWithResult(context.Background(), forexIntent("EURUSD", "BUY"), "dec-001")
@@ -339,8 +203,7 @@ func TestExecutor_DupCheck_OpenOrdersError_NoPlace(t *testing.T) {
 		openOrdersErr:  errors.New("orders endpoint timeout"),
 	}
 	ex := &aegis.Executor{
-		Broker:  sb,
-		RiskPct: 0.01,
+		Broker: sb,
 	}
 
 	_, placed, err := ex.ExecuteWithResult(context.Background(), forexIntent("EURUSD", "BUY"), "dec-002")
@@ -374,9 +237,8 @@ func TestExecutor_FlipClose_Terminal_NoNewEntry(t *testing.T) {
 	}
 	store := &stubStore{}
 	ex := &aegis.Executor{
-		Broker:  sb,
-		Store:   store,
-		RiskPct: 0.01,
+		Broker: sb,
+		Store:  store,
 	}
 
 	_, placed, err := ex.ExecuteWithResult(context.Background(), forexIntent("EURUSD", "BUY"), "dec-005")
@@ -416,9 +278,8 @@ func TestExecutor_FlipClose_NilStore_NoSavePanic(t *testing.T) {
 		},
 	}
 	ex := &aegis.Executor{
-		Broker:  sb,
-		Store:   nil, // no store
-		RiskPct: 0.01,
+		Broker: sb,
+		Store:  nil, // no store
 	}
 	intent := forexIntent("GBPUSD", "SELL")
 	_, placed, err := ex.ExecuteWithResult(context.Background(), intent, "dec-flipnil")
@@ -434,14 +295,13 @@ func TestExecutor_FlipClose_NilStore_NoSavePanic(t *testing.T) {
 
 func TestExecutor_CryptoDealingRulesError_Skip(t *testing.T) {
 	sb := &stubBroker{
-		openTradesResp: []broker.OpenTrade{},
-		openOrdersResp: []broker.OpenOrder{},
+		openTradesResp:  []broker.OpenTrade{},
+		openOrdersResp:  []broker.OpenOrder{},
 		dealingRulesErr: errors.New("instrument not found"),
 		hasDealingRules: true,
 	}
 	ex := &aegis.Executor{
-		Broker:  sb,
-		RiskPct: 0.01,
+		Broker: sb,
 	}
 
 	_, placed, err := ex.ExecuteWithResult(context.Background(), cryptoIntent("BTCUSD", "BUY"), "dec-006")
@@ -518,6 +378,7 @@ func TestGateway_InFlight_RaceLosers_GetReasonInFlight(t *testing.T) {
 		Entry:      1.0850,
 		StopLoss:   1.0820,
 		TakeProfit: 1.0895,
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 	}
 
@@ -593,85 +454,6 @@ func TestGateway_ExecutorError_ReasonExecutorSkip_Cached(t *testing.T) {
 	}
 }
 
-// ── Invariant #3: DefaultQuoteConverter ──────────────────────────────────────
-
-func TestDefaultQuoteConverter_USDJPY_InverseEntry(t *testing.T) {
-	// USDJPY: base=USD, quote=JPY → factor should be 1/entry, not 1.0.
-	entry := 150.0
-	ctx := context.Background()
-
-	factor, exact := aegis.DefaultQuoteConverter(ctx, "USDJPY", entry)
-	if !exact {
-		t.Error("DefaultQuoteConverter USDJPY: expected exact=true (USD-base path)")
-	}
-	want := 1.0 / entry // ≈ 0.00667
-	if diff := factor - want; diff < -1e-9 || diff > 1e-9 {
-		t.Errorf("DefaultQuoteConverter USDJPY: factor=%.8f, want %.8f (1/entry)", factor, want)
-	}
-
-	// Verify this produces a correct unit count vs IdentityConverter.
-	balanceUSD := 10_000.0
-	riskPct := 0.01
-	sl := 149.5
-
-	unitsCorrect, err := aegis.SizeForex(balanceUSD, riskPct, entry, sl, factor)
-	if err != nil {
-		t.Fatalf("SizeForex correct: %v", err)
-	}
-	unitsWrong, _ := aegis.SizeForex(balanceUSD, riskPct, entry, sl, 1.0) // identity (wrong)
-
-	// With identity: units = 100 / 0.5 = 200 (severely undersized)
-	// With 1/150:    units = 100 / (0.5 * 1/150) = 100 / 0.00333 = 30000 (correct)
-	if unitsCorrect < 25_000 || unitsCorrect > 35_000 {
-		t.Errorf("correct factor produced %d units for USDJPY, expected ~30000", unitsCorrect)
-	}
-	if unitsWrong > 500 {
-		t.Errorf("identity factor produced %d units — sanity check unexpected", unitsWrong)
-	}
-	// Correct sizing should be ~150x larger than the identity-based sizing.
-	ratio := float64(unitsCorrect) / float64(unitsWrong)
-	if ratio < 100 || ratio > 200 {
-		t.Errorf("USDJPY sizing ratio correct/wrong = %.1f, expected ~150", ratio)
-	}
-}
-
-func TestDefaultQuoteConverter_EURUSD_Unity(t *testing.T) {
-	// EURUSD: quote=USD → factor must be 1.0.
-	ctx := context.Background()
-	factor, exact := aegis.DefaultQuoteConverter(ctx, "EURUSD", 1.0850)
-	if !exact {
-		t.Error("DefaultQuoteConverter EURUSD: expected exact=true")
-	}
-	if factor != 1.0 {
-		t.Errorf("DefaultQuoteConverter EURUSD: factor=%.6f, want 1.0", factor)
-	}
-}
-
-func TestDefaultQuoteConverter_USDCHF_InverseEntry(t *testing.T) {
-	entry := 0.90
-	ctx := context.Background()
-	factor, exact := aegis.DefaultQuoteConverter(ctx, "USDCHF", entry)
-	if !exact {
-		t.Error("DefaultQuoteConverter USDCHF: expected exact=true (USD-base path)")
-	}
-	want := 1.0 / entry
-	if diff := factor - want; diff < -1e-9 || diff > 1e-9 {
-		t.Errorf("DefaultQuoteConverter USDCHF: factor=%.6f, want %.6f", factor, want)
-	}
-}
-
-func TestDefaultQuoteConverter_NonPair_Unity(t *testing.T) {
-	// Non-fiat symbols (stock, crypto) → 1.0, false.
-	ctx := context.Background()
-	factor, exact := aegis.DefaultQuoteConverter(ctx, "AAPL", 180.0)
-	if exact {
-		t.Error("DefaultQuoteConverter AAPL: expected exact=false")
-	}
-	if factor != 1.0 {
-		t.Errorf("DefaultQuoteConverter AAPL: factor=%.6f, want 1.0", factor)
-	}
-}
-
 // ── Invariant #2: DefaultExecutability ───────────────────────────────────────
 
 func TestDefaultExecutability_StockRejected_NoSlotConsumed(t *testing.T) {
@@ -701,6 +483,7 @@ func TestDefaultExecutability_StockRejected_NoSlotConsumed(t *testing.T) {
 		Entry:      180.0,
 		StopLoss:   176.0,
 		TakeProfit: 192.0, // RR = 12/4 = 3.0 (above 1.5)
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 	}
 
@@ -761,6 +544,7 @@ func TestDefaultExecutability_CoreCryptoPasses(t *testing.T) {
 		Entry:      50_000.0,
 		StopLoss:   49_000.0,
 		TakeProfit: 53_500.0, // RR = 3500/1000 = 3.5
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 	}
 	result, _ := gw.Submit(context.Background(), sig)
@@ -792,6 +576,7 @@ func TestDefaultExecutability_NonCoreCryptoRejected(t *testing.T) {
 		Entry:      0.12,
 		StopLoss:   0.10,
 		TakeProfit: 0.16, // RR = 0.04/0.02 = 2.0
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 	}
 	result, _ := gw.Submit(context.Background(), sig)
@@ -809,8 +594,7 @@ func TestExecutor_ForexHappyPath_Placed(t *testing.T) {
 	pb := paper.New(10_000, nil)
 
 	ex := &aegis.Executor{
-		Broker:  pb,
-		RiskPct: 0.01,
+		Broker: pb,
 	}
 
 	intent := forexIntent("EURUSD", "BUY")

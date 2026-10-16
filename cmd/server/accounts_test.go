@@ -21,7 +21,7 @@ func good() map[string]string {
 }
 
 func testAccounts(allowLive bool) (*accounts, *int) {
-	a := newAccounts(aegis.Executor{RiskPct: 0.01, MinConfidence: 45}, allowLive)
+	a := newAccounts(aegis.Executor{MinConfidence: 45}, allowLive)
 	built := 0
 	a.newBroker = func(accountSpec) broker.Port { built++; return paper.New(5_000, nil) }
 	return a, &built
@@ -34,7 +34,7 @@ func TestResolve_BuildsAnExecutorForTheAccount(t *testing.T) {
 		t.Fatalf("resolve: key=%q err=%v", key, err)
 	}
 	e, ok := executorFrom(ctx)
-	if !ok || e.Broker == nil || e.RiskPct != 0.01 || e.MinConfidence != 45 || e.BrokerName != "capital:demo" {
+	if !ok || e.Broker == nil || e.MinConfidence != 45 || e.BrokerName != "capital:demo" {
 		t.Fatalf("executor missing or not built from the template: %+v ok=%v", e, ok)
 	}
 	if strings.Contains(key, "hunter2") || strings.Contains(key, "k1") {

@@ -125,9 +125,9 @@ func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *co
 		"place_trade",
 		mcp.WithDescription(
 			"Submit a forex/crypto/stock trade signal to the aegis gateway. The signal is "+
-				"validated, sized, deduplicated and (if accepted) routed to the live broker "+
-				"by the server-side Gateway. Position size is decided server-side and is NOT "+
-				"an input. Returns the gateway verdict; a validation rejection is a normal "+
+				"validated, deduplicated and (if accepted) routed to the broker by the "+
+				"server-side Gateway. The caller chooses the position size: aegis never "+
+				"works it out, and uses it exactly as given or skips the trade. Returns the gateway verdict; a validation rejection is a normal "+
 				"result (accepted=false with a reason), not an error.",
 		),
 		mcp.WithString("symbol", mcp.Required(),
@@ -142,6 +142,8 @@ func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *co
 			mcp.Description("Stop-loss price. BUY: below entry. SELL: above entry.")),
 		mcp.WithNumber("take_profit", mcp.Required(),
 			mcp.Description("Take-profit price. BUY: above entry. SELL: below entry. RR must be >= 1.5.")),
+		mcp.WithNumber("size", mcp.Required(),
+			mcp.Description("How much to trade. Forex and stocks: a whole number of units (e.g. 10000). Crypto: a quantity of the base asset (e.g. 0.05 for BTC). Must be > 0. Used exactly as given; a size the broker won't accept is skipped, never changed.")),
 		mcp.WithString("strategy", mcp.Required(),
 			mcp.Description("Free-text strategy name identifying how the levels were derived (e.g. smc_engine, topdown, zone_internal). Carried for provenance — not validated by the gateway.")),
 		mcp.WithString("note",
@@ -187,6 +189,10 @@ func placeTradeHandler(gateway aegis.Gateway, cfg *config, logger *log.Logger) s
 		takeProfit, err := req.RequireFloat("take_profit")
 		if err != nil {
 			return mcp.NewToolResultError("take_profit is required (number)"), nil
+		}
+		size, err := req.RequireFloat("size")
+		if err != nil {
+			return mcp.NewToolResultError("size is required (number)"), nil
 		}
 		strategyArg, err := req.RequireString("strategy")
 		if err != nil {
@@ -234,11 +240,12 @@ func placeTradeHandler(gateway aegis.Gateway, cfg *config, logger *log.Logger) s
 			Entry:      entry,
 			StopLoss:   stopLoss,
 			TakeProfit: takeProfit,
+			Size:       size,
 			Note:       note,
 			Timestamp:  time.Now().Unix(),
 		}
 
-		// Single business path. The gateway owns validation/sizing/dedup; this
+		// Single business path. The gateway owns validation and dedup; this
 		// adapter only maps the verdict back to the agent.
 		subCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()

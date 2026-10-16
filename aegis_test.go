@@ -46,6 +46,7 @@ func buySignal(id string) aegis.TradeSignal {
 		Entry:      1.0850,
 		StopLoss:   1.0820,
 		TakeProfit: 1.0895, // RR = 45/30 = 1.5
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 	}
 }
@@ -332,83 +333,6 @@ func TestNewGateway_NilPlaceReturnsError(t *testing.T) {
 	}
 }
 
-// ── Sizing helpers ────────────────────────────────────────────────────────────
-
-func TestSizeForex_Basic(t *testing.T) {
-	// balance=10000, risk=1%, entry=1.0850, sl=1.0820, factor=1.0
-	// slDist≈0.003 (IEEE-754), riskAmount=100
-	// rawUnits = 100/slDist ≈ 33333.333... → math.Round = 33333
-	// (Floor and Round agree here; the fractional part is ~0.333, below 0.5)
-	units, err := aegis.SizeForex(10000, 0.01, 1.0850, 1.0820, 1.0)
-	if err != nil {
-		t.Fatalf("SizeForex: %v", err)
-	}
-	if units != 33333 {
-		t.Errorf("SizeForex units = %d, want 33333", units)
-	}
-}
-
-func TestSizeForex_JPYFactor(t *testing.T) {
-	// USDJPY: factor = 1/150 ≈ 0.00667. Entry=150, SL=149.5, slDist=0.5 (exact)
-	// riskAmount = 10000 * 0.01 = 100
-	// rawUnits = 100 / (0.5 * (1/150)) ≈ 29999.999... (fp), math.Round = 30000
-	factor := 1.0 / 150.0
-	units, err := aegis.SizeForex(10000, 0.01, 150.0, 149.5, factor)
-	if err != nil {
-		t.Fatalf("SizeForex JPY: %v", err)
-	}
-	// math.Round(29999.999...) = 30000 — very different from 66 (which you'd get with factor=1).
-	if units != 30000 {
-		t.Errorf("SizeForex JPY units = %d, want 30000", units)
-	}
-}
-
-func TestSizeCrypto_Basic(t *testing.T) {
-	// balance=10000, risk=1%, entry=50000, sl=49000
-	// slPct = |50000-49000| / 50000 = 0.02
-	// riskAmount = 10000 * 0.01 = 100
-	// qty = 100 / 0.02 / 50000 = 5000 / 50000 = 0.1
-	qty, err := aegis.SizeCrypto(10000, 0.01, 50000, 49000)
-	if err != nil {
-		t.Fatalf("SizeCrypto: %v", err)
-	}
-	const want = 0.1
-	diff := qty - want
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 0.000001 {
-		t.Errorf("SizeCrypto qty = %.8f, want %.8f", qty, want)
-	}
-}
-
-func TestClampCryptoQuantity_AboveMax(t *testing.T) {
-	clamped, ok := aegis.ClampCryptoQuantity(0.05, 0.001, 0.01)
-	if !ok {
-		t.Error("expected ok=true when qty > min")
-	}
-	if clamped != 0.01 {
-		t.Errorf("expected clamped to max 0.01, got %f", clamped)
-	}
-}
-
-func TestClampCryptoQuantity_BelowMin(t *testing.T) {
-	_, ok := aegis.ClampCryptoQuantity(0.0001, 0.001, 0.01)
-	if ok {
-		t.Error("expected ok=false when qty < min (must skip, not upsize)")
-	}
-}
-
-func TestClampCryptoQuantity_InRange(t *testing.T) {
-	clamped, ok := aegis.ClampCryptoQuantity(0.005, 0.001, 0.01)
-	if !ok {
-		t.Error("expected ok=true for in-range qty")
-	}
-	if clamped != 0.005 {
-		t.Errorf("expected unchanged qty 0.005, got %f", clamped)
-	}
-}
-
 // ── ExecutabilityCheck hook ───────────────────────────────────────────────────
 
 func TestExecutabilityCheck_PreReservationReject(t *testing.T) {
@@ -685,6 +609,7 @@ func manualBuySignal(id string, manual bool) aegis.TradeSignal {
 		Entry:      1.0850,
 		StopLoss:   1.0820,
 		TakeProfit: 1.0886,
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 		Manual:     manual,
 	}
@@ -739,6 +664,7 @@ func TestManual_BadStructure_Rejected(t *testing.T) {
 		Entry:      1.0850,
 		StopLoss:   1.0880, // ABOVE entry for a BUY — structurally invalid
 		TakeProfit: 1.0920,
+		Size:       10000,
 		Timestamp:  time.Now().Unix(),
 		Manual:     true,
 	}
@@ -806,7 +732,6 @@ func TestManual_SessionBypass(t *testing.T) {
 
 	ex := &aegis.Executor{
 		Broker:      pb,
-		RiskPct:     0.01,
 		SessionGate: alwaysVeto,
 	}
 
@@ -818,6 +743,7 @@ func TestManual_SessionBypass(t *testing.T) {
 		EntryPrice: 1.0850,
 		StopLoss:   1.0820,
 		TakeProfit: 1.0886,
+		Size:       10000,
 		Confidence: 60,
 		Manual:     true, // must bypass the always-veto session gate
 	}
@@ -849,7 +775,6 @@ func TestManual_ConfidenceBypass(t *testing.T) {
 
 	ex := &aegis.Executor{
 		Broker:        pb,
-		RiskPct:       0.01,
 		MinConfidence: 80,
 		// IsAlgoPair: nil → DefaultIsAlgoPair → crypto is NOT algo, confidence applies.
 	}
@@ -863,6 +788,7 @@ func TestManual_ConfidenceBypass(t *testing.T) {
 		EntryPrice: 50_000,
 		StopLoss:   49_000,
 		TakeProfit: 53_000,
+		Size:       0.05,
 		Confidence: 30, // below MinConfidence=80
 		Manual:     true,
 	}
@@ -884,7 +810,6 @@ func TestManual_ConfidenceBypass(t *testing.T) {
 	pb2.DealingRules["BTCUSD"] = broker.DealingRules{MinDealSize: 0.001, MaxDealSize: 5.0}
 	ex2 := &aegis.Executor{
 		Broker:        pb2,
-		RiskPct:       0.01,
 		MinConfidence: 80,
 	}
 	_, placed2, err2 := ex2.ExecuteWithResult(context.Background(), intent, "manual-conf-veto-002")
@@ -908,4 +833,3 @@ func stubPlaceSource(t *testing.T, _ string, wantPlaced bool) aegis.PlaceFunc {
 		return "", false, nil
 	}
 }
-

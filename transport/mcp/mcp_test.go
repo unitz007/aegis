@@ -65,6 +65,7 @@ func validArgs() map[string]any {
 		"entry":       1.1000,
 		"stop_loss":   1.0950,
 		"take_profit": 1.1100,
+		"size":        10000,
 		"strategy":    "smc_engine",
 		"note":        "test setup",
 	}
@@ -126,7 +127,7 @@ func TestPlaceTrade_ValidCallSubmitsOnceAndMapsResult(t *testing.T) {
 	if sig.Symbol != "EURUSD" || sig.Direction != "BUY" || sig.OrderType != "limit" {
 		t.Errorf("unexpected mapped fields: %+v", sig)
 	}
-	if sig.Entry != 1.1000 || sig.StopLoss != 1.0950 || sig.TakeProfit != 1.1100 {
+	if sig.Entry != 1.1000 || sig.StopLoss != 1.0950 || sig.TakeProfit != 1.1100 || sig.Size != 10000 {
 		t.Errorf("unexpected mapped levels: %+v", sig)
 	}
 	if sig.Timestamp == 0 {
@@ -205,6 +206,26 @@ func TestPlaceTrade_MissingRequiredArgDoesNotSubmit(t *testing.T) {
 	}
 	if gw.count() != 0 {
 		t.Fatalf("gateway must not be called on missing arg, got %d", gw.count())
+	}
+}
+
+// TestPlaceTrade_SizeIsRequired: aegis never works out a size, so a call without
+// one must be refused before it reaches the gateway.
+func TestPlaceTrade_SizeIsRequired(t *testing.T) {
+	gw := newStubGateway([]string{"smc_engine"}, aegis.SignalResult{}, nil)
+	h := placeTradeHandler(gw, defaultConfig("claude"), nil)
+
+	args := validArgs()
+	delete(args, "size")
+	res, err := h(context.Background(), callReq(args))
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("a call without size should be an error result")
+	}
+	if gw.count() != 0 {
+		t.Fatalf("gateway must not be called without a size, got %d", gw.count())
 	}
 }
 

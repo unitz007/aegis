@@ -52,18 +52,16 @@ func main() {
 	//   • dup-check against open trades and orders (fail-closed on error)
 	//   • flip-close / flip-cancel for opposite positions
 	//   • session gating (AlwaysAllow by default)
-	//   • position sizing (SizeForex / SizeCrypto)
-	//   • dealing-rules clamping for crypto (type-asserts DealingRulesProvider)
+	//   • the caller's size, used exactly as given (aegis never sizes a trade)
+	//   • dealing-rules check of crypto sizes (type-asserts DealingRulesProvider)
 	//   • optional receipt + journal persistence
 	exec := &aegis.Executor{
 		Broker:     pb,
 		BrokerName: "paper",
-		RiskPct:    0.01, // risk 1% of balance per trade
-		// All hook fields (IsAlgoPair, SessionGate, QuoteConverter) are nil here,
+		// All hook fields (IsAlgoPair, SessionGate) are nil here,
 		// which causes the executor to use the safe standalone defaults:
 		//   IsAlgoPair      → DefaultIsAlgoPair   (forex = algo, crypto/stocks = ai)
 		//   SessionGate     → AlwaysAllow          (no session restriction)
-		//   QuoteConverter  → DefaultQuoteConverter (correct for USD-quoted pairs)
 	}
 
 	// ── 3. Build the Gateway ─────────────────────────────────────────────────────
@@ -125,6 +123,7 @@ func main() {
 		Entry:      1.0850,
 		StopLoss:   1.0810,
 		TakeProfit: 1.0910,
+		Size:       10000, // units: the caller decides how much
 		Note:       "BOS retest at H4 OB, London session",
 		Timestamp:  time.Now().Unix(),
 	})
@@ -147,6 +146,7 @@ func main() {
 		Entry:     1.0850,
 		StopLoss:  1.0810,
 		TakeProfit: 1.0910,
+		Size:       10000, // units: the caller decides how much
 		Timestamp: time.Now().Unix(),
 	})
 	printResult("DEDUP", r2, err)
@@ -170,6 +170,7 @@ func main() {
 		Entry:      220.00,
 		StopLoss:   215.00,
 		TakeProfit: 232.50,
+		Size:       10000, // units: the caller decides how much
 		Timestamp:  time.Now().Unix(),
 	})
 	printResult("REJECT(stock)", r3, err)
@@ -191,6 +192,7 @@ func main() {
 		Entry:      1.2640,
 		StopLoss:   1.2630, // 10-pip SL
 		TakeProfit: 1.2652, // 12-pip TP → RR 1.2 < 1.5
+		Size:       10000, // units: the caller decides how much
 		Timestamp:  time.Now().Unix(),
 	})
 	printResult("REJECT(RR)", r4, err)

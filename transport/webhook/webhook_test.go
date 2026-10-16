@@ -68,6 +68,7 @@ func validBody() map[string]any {
 		"entry":       1.1000,
 		"stop_loss":   1.0950,
 		"take_profit": 1.1100,
+		"size":        10000,
 		"strategy":    "smc_engine",
 		"note":        "test",
 	}
@@ -123,6 +124,10 @@ func TestWebhook_GoodSignatureSubmitsToGateway(t *testing.T) {
 	}
 	if out["placed"] != true {
 		t.Errorf("expected placed=true: %+v", out)
+	}
+	// The caller's size reaches the gateway exactly as sent.
+	if got := gw.last().Size; got != 10000 {
+		t.Errorf("size = %v, want 10000 passed through", got)
 	}
 }
 

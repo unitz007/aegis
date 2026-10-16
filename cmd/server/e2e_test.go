@@ -22,7 +22,7 @@ import (
 // broker and never on the server's default broker.
 func TestEndToEnd_TradeLandsOnTheRequestedAccount(t *testing.T) {
 	defaultBroker := paper.New(100_000, nil)
-	def := &aegis.Executor{Broker: defaultBroker, BrokerName: "paper", RiskPct: 0.01, MinConfidence: 45}
+	def := &aegis.Executor{Broker: defaultBroker, BrokerName: "paper", MinConfidence: 45}
 
 	accts := newAccounts(*def, false)
 	brokers := map[string]*paper.Broker{}
@@ -50,7 +50,7 @@ func TestEndToEnd_TradeLandsOnTheRequestedAccount(t *testing.T) {
 	send := func(account map[string]string) *httptest.ResponseRecorder {
 		body := map[string]any{
 			"signal_id": "same-id", "timestamp": time.Now().Unix(), "symbol": "EURUSD", "direction": "BUY",
-			"order_type": "limit", "entry": 1.1000, "stop_loss": 1.0950, "take_profit": 1.1100, "strategy": "agent",
+			"order_type": "limit", "entry": 1.1000, "stop_loss": 1.0950, "take_profit": 1.1100, "size": 10000, "strategy": "agent",
 		}
 		if account != nil {
 			body["account"] = account

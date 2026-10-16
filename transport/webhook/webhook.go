@@ -112,9 +112,9 @@ type signalRequest struct {
 	// bypasses the RR floor, and the executor bypasses the session veto and
 	// confidence gate. Structural validity and the source allowlist still apply.
 	Manual bool `json:"manual,omitempty"`
-	// RiskMult is an optional per-signal sizing multiplier forwarded to the
-	// executor. Absent / ≤0 is treated as 1.0 by the executor (no change).
-	RiskMult float64 `json:"risk_mult,omitempty"`
+	// Size is how much to trade, chosen by the caller (aegis never sizes a trade):
+	// whole units for forex and stocks, a base-asset quantity for crypto. Required.
+	Size float64 `json:"size"`
 	// Account optionally names the broker account to trade on (provider-specific
 	// JSON, interpreted by the AccountResolver). Absent → the server's default
 	// broker, so existing producers are unaffected.
@@ -264,7 +264,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Note:       req.Note,
 		Timestamp:  req.Timestamp,
 		Manual:     req.Manual,
-		RiskMult:   req.RiskMult,
+		Size:       req.Size,
 	}
 
 	// ── Submit to the gateway (single business path) ──────────────────────────

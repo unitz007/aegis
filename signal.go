@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +31,9 @@ import (
 // Source is validated against AllowedSources in GatewayConfig. Strategy is
 // free-text provenance carried for attribution; it is never validated.
 type TradeSignal struct {
-	Source     string  `json:"source"`     // who produced it — validated against AllowedSources
-	Strategy   string  `json:"strategy"`   // how levels were derived — free-text, carried for provenance
-	SignalID   string  `json:"signal_id"`  // idempotency key — required, non-empty
+	Source     string  `json:"source"`    // who produced it — validated against AllowedSources
+	Strategy   string  `json:"strategy"`  // how levels were derived — free-text, carried for provenance
+	SignalID   string  `json:"signal_id"` // idempotency key — required, non-empty
 	Symbol     string  `json:"symbol"`
 	Direction  string  `json:"direction"`  // "BUY" | "SELL"
 	OrderType  string  `json:"order_type"` // "limit" | "market" | "" (→ "limit")
@@ -41,18 +42,17 @@ type TradeSignal struct {
 	TakeProfit float64 `json:"take_profit"`
 	Note       string  `json:"note"`
 	Timestamp  int64   `json:"timestamp"` // unix seconds
-	// Manual=true marks a human-placed discretionary trade. aegis will SIZE and
-	// PLACE the order but will BYPASS the RR floor, session veto, and confidence
+	// Manual=true marks a human-placed discretionary trade. aegis will PLACE the
+	// order (at the size given) but will BYPASS the RR floor, session veto, and confidence
 	// gate. Structural validity (direction-consistent levels, entry/stop/tp > 0)
 	// and idempotency still apply. The source allowlist is also still enforced —
 	// Manual is a bypass flag, not an authentication mechanism.
 	Manual bool `json:"manual,omitempty"`
-	// RiskMult is an optional per-signal position-size multiplier. The executor
-	// computes: effectiveRiskPct = baseRiskPct * RiskMult, capped at 5% to
-	// prevent runaway size from a bad multiplier. Absent / ≤0 → treated as 1.0
-	// (no change); backward-compatible with producers that do not send the field.
-	// Manual signals are not expected to carry this field.
-	RiskMult float64 `json:"risk_mult,omitempty"`
+	// Size is how much to trade, decided by the caller; aegis never works it out.
+	// Forex and stocks: a whole number of units. Crypto: a quantity of the base
+	// asset (for example 0.05 BTC). Required, > 0. It is used exactly as given or
+	// the trade is skipped; it is never raised, lowered or rounded.
+	Size float64 `json:"size"`
 }
 
 // SignalReasonCode is a stable, machine-readable verdict classification.
@@ -82,10 +82,10 @@ const (
 
 // SignalResult is the Gateway's verdict for a submitted TradeSignal.
 type SignalResult struct {
-	Accepted      bool            `json:"accepted"`        // passed validation + idempotency
-	Placed        bool            `json:"placed"`          // executor actually placed a broker order
-	BrokerOrderID string          `json:"broker_order_id"` // set when Placed=true
-	Reason        string          `json:"reason"`          // human-readable — for logs only; may embed caller input
+	Accepted      bool             `json:"accepted"`        // passed validation + idempotency
+	Placed        bool             `json:"placed"`          // executor actually placed a broker order
+	BrokerOrderID string           `json:"broker_order_id"` // set when Placed=true
+	Reason        string           `json:"reason"`          // human-readable — for logs only; may embed caller input
 	Code          SignalReasonCode `json:"code"`            // machine-readable — switch on this
 }
 
@@ -98,9 +98,9 @@ type SignalResult struct {
 // TF narrations) present in a full pipeline decision.
 type OrderIntent struct {
 	Symbol     string
-	AssetClass string  // "forex" | "crypto" | "stock" — populated by SymbolClassifier hook
-	Direction  string  // "BUY" | "SELL"
-	OrderType  string  // "limit" | "market"
+	AssetClass string // "forex" | "crypto" | "stock" — populated by SymbolClassifier hook
+	Direction  string // "BUY" | "SELL"
+	OrderType  string // "limit" | "market"
 	EntryPrice float64
 	StopLoss   float64
 	TakeProfit float64
@@ -115,10 +115,9 @@ type OrderIntent struct {
 	// It is propagated from TradeSignal.Manual. The RR floor is bypassed at the
 	// gateway (validateSignal) before OrderIntent is constructed.
 	Manual bool
-	// RiskMult carries the per-signal sizing multiplier from the signal producer.
-	// Propagated from TradeSignal.RiskMult. The executor applies it at the
-	// SizeForex/SizeCrypto call; 0 / absent → treated as 1.0.
-	RiskMult float64
+	// Size is the caller's position size, passed through untouched: whole units for
+	// forex and stocks, a base-asset quantity for crypto.
+	Size float64
 	// ReasonText is a single audit string surfaced in the trade journal.
 	ReasonText string
 }
@@ -317,7 +316,7 @@ func (g *signalGateway) Submit(ctx context.Context, sig TradeSignal) (SignalResu
 		Strategy:   sig.Strategy,
 		Confidence: 60, // default for gateway-submitted signals
 		Manual:     sig.Manual,
-		RiskMult:   sig.RiskMult,
+		Size:       sig.Size,
 		ReasonText: sig.Note,
 	}
 
@@ -395,6 +394,9 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 	if sig.TakeProfit <= 0 {
 		return reject("take_profit must be > 0")
 	}
+	if math.IsNaN(sig.Size) || math.IsInf(sig.Size, 0) || sig.Size <= 0 {
+		return reject("size must be > 0")
+	}
 
 	// Direction-consistent level checks.
 	if sig.Direction == "BUY" {
@@ -435,6 +437,9 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 	assetClass := g.cfg.SymbolClassifier(sig.Symbol)
 	if ok, reason := g.cfg.ExecutabilityCheck(sig.Symbol, assetClass); !ok {
 		return reject(fmt.Sprintf("symbol %s not executable: %s", sig.Symbol, reason))
+	}
+	if assetClass != "crypto" && sig.Size != math.Trunc(sig.Size) {
+		return reject("size must be a whole number of units for this symbol")
 	}
 
 	return SignalResult{}, true
