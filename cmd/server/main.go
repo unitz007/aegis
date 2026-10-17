@@ -14,7 +14,6 @@
 //	MCP_AUTH_TOKEN         Bearer token for the MCP transport
 //	BROKER_MODE            "paper" | "capital" (DEFAULT "paper" — live-money master switch)
 //	ALLOWED_SOURCES        comma-separated source tags accepted by the Gateway (default "finos")
-//	MIN_RR                 minimum reward:risk floor (default 2.0)
 //	MIN_CONFIDENCE         minimum LLM confidence for non-algo pairs (default 45)
 //
 // Safety invariants:
@@ -55,13 +54,8 @@ func main() {
 	mcpAuthToken := os.Getenv("MCP_AUTH_TOKEN")
 	brokerMode := strings.ToLower(getenvOrDefault("BROKER_MODE", "paper"))
 	allowedSourcesRaw := getenvOrDefault("ALLOWED_SOURCES", "finos")
-	minRRStr := getenvOrDefault("MIN_RR", "2.0")
 	minConfidenceStr := getenvOrDefault("MIN_CONFIDENCE", "45")
 
-	minRR, err := strconv.ParseFloat(minRRStr, 64)
-	if err != nil || minRR <= 0 {
-		log.Fatalf("server: invalid MIN_RR=%q (must be a positive float)", minRRStr)
-	}
 	minConfidence, err := strconv.Atoi(minConfidenceStr)
 	if err != nil || minConfidence < 0 {
 		log.Fatalf("server: invalid MIN_CONFIDENCE=%q (must be a non-negative integer)", minConfidenceStr)
@@ -74,8 +68,8 @@ func main() {
 
 	// ── Startup banner (never log secrets) ───────────────────────────────────────
 	log.Printf("server: starting aegis-exec")
-	log.Printf("server: broker_mode=%s capital_env=%s allowed_sources=%v min_rr=%.2f min_confidence=%d",
-		brokerMode, capitalEnv, allowedSources, minRR, minConfidence)
+	log.Printf("server: broker_mode=%s capital_env=%s allowed_sources=%v min_confidence=%d",
+		brokerMode, capitalEnv, allowedSources, minConfidence)
 
 	// ── Broker selection — fail-closed ───────────────────────────────────────────
 	var brokerImpl broker.Port
@@ -148,7 +142,6 @@ func main() {
 
 	gw, err := aegis.NewGateway(placeFunc, aegis.GatewayConfig{
 		AllowedSources:     allowedSources,
-		MinRR:              minRR,
 		SymbolClassifier:   aegis.ClassifySymbolDefault,
 		ExecutabilityCheck: aegis.DefaultExecutability,
 	})

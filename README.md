@@ -51,7 +51,6 @@ func main() {
         aegis.GatewayConfig{
             AllowedSources:    []string{"my-agent"},
             AllowedStrategies: []string{"smc"},
-            MinRR:             1.5,
             // SymbolClassifier   → ClassifySymbolDefault (pure function, no network)
             // ExecutabilityCheck → DefaultExecutability  (forex + core-algo crypto only)
         },
@@ -70,7 +69,7 @@ func main() {
         OrderType:  "limit",
         Entry:      1.0850,
         StopLoss:   1.0810,         // 40-pip SL
-        TakeProfit: 1.0910,         // 60-pip TP → RR 1.5
+        TakeProfit: 1.0910,         // 60-pip TP → RR 1.5 (aegis checks this only if you set MinRR)
         Timestamp:  time.Now().Unix(),
     })
     if err != nil {
@@ -135,7 +134,8 @@ Remote producers reach the gateway through one of two transports. Both validate,
 | `order_type` | string | ✓ | `limit` \| `market` |
 | `entry` | number | ✓ | absolute price, in the symbol's quote units |
 | `stop_loss` | number | ✓ | BUY: below entry · SELL: above entry |
-| `take_profit` | number | ✓ | BUY: above entry · SELL: below entry · RR must be ≥ `MinRR` (default 1.5) |
+| `take_profit` | number | ✓ | BUY: above entry · SELL: below entry |
+| `min_rr` | number |  | The smallest reward-to-risk you will accept for this trade (e.g. `2`). aegis has no ratio of its own: omit it or send `0` and nothing is checked. A trade whose levels give less is rejected. |
 | `strategy` | string | ✓ | one of the gateway's `AllowedStrategies` (advertised as an enum in the tool schema) |
 | `note` | string | – | free-text rationale, recorded with the trade |
 | `idempotency_key` | string | – | `[A-Za-z0-9._-]`, ≤ 64 chars → stable `signal_id`; omit for a server-generated one |
@@ -147,7 +147,7 @@ Remote producers reach the gateway through one of two transports. Both validate,
   "reason": "", "signal_id": "claude-ab12", "broker_order_id": "DIATF8U2" }
 ```
 
-A gateway rejection (e.g. RR below floor, symbol not executable, duplicate) is a **normal result with `accepted: false`** and a `code`/`reason` — not a tool error. Only an internal failure is an MCP tool error.
+A gateway rejection (e.g. below the `min_rr` you set, symbol not executable, duplicate) is a **normal result with `accepted: false`** and a `code`/`reason` — not a tool error. Only an internal failure is an MCP tool error.
 
 ### Webhook — signed POST
 
@@ -161,6 +161,8 @@ A gateway rejection (e.g. RR below floor, symbol not executable, duplicate) is a
 | `timestamp` | int64 | unix seconds; must be within ±60 s of now (replay window, configurable) |
 | `symbol`, `direction`, `order_type` | string | as in the MCP tool |
 | `entry`, `stop_loss`, `take_profit` | number | as in the MCP tool |
+| `size` | number | required: how much to trade, as in the MCP tool |
+| `min_rr` | number | optional: the smallest reward-to-risk you will accept, as in the MCP tool |
 | `strategy` | string | allowlisted |
 | `note` | string | optional |
 
@@ -169,7 +171,7 @@ A gateway rejection (e.g. RR below floor, symbol not executable, duplicate) is a
 Signing example:
 
 ```bash
-BODY='{"signal_id":"sig-001","timestamp":1733580000,"symbol":"EURUSD","direction":"BUY","order_type":"limit","entry":1.0850,"stop_loss":1.0810,"take_profit":1.0910,"strategy":"smc"}'
+BODY='{"signal_id":"sig-001","timestamp":1733580000,"symbol":"EURUSD","direction":"BUY","order_type":"limit","entry":1.0850,"stop_loss":1.0810,"take_profit":1.0910,"size":10000,"strategy":"smc"}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SIGNING_SECRET" | awk '{print $2}')
 curl -X POST https://host/signal/trade \
   -H "X-Signature: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"

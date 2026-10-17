@@ -2,6 +2,7 @@ package aegis_test
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,6 @@ func defaultGW(t *testing.T, place aegis.PlaceFunc) aegis.Gateway {
 	t.Helper()
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources: []string{"test-agent"},
-		MinRR:          1.5,
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
@@ -150,10 +150,11 @@ func TestValidation_EmptySignalID(t *testing.T) {
 func TestValidation_RRBelowMinimum(t *testing.T) {
 	gw := defaultGW(t, stubPlace(t, false))
 	sig := buySignal("sig-rr-fail")
-	sig.TakeProfit = 1.0855 // RR = 5/30 < 1.5
+	sig.TakeProfit = 1.0855 // RR = 5/30
+	sig.MinRR = 1.5         // the sender wants at least 1.5
 	result, _ := gw.Submit(context.Background(), sig)
 	if result.Accepted {
-		t.Error("expected rejection for RR below minimum")
+		t.Error("expected rejection for RR below the minimum the sender asked for")
 	}
 	if result.Code != aegis.ReasonValidation {
 		t.Errorf("expected ReasonValidation, got %q", result.Code)
@@ -578,14 +579,13 @@ func TestPaperBroker_AmendTrade(t *testing.T) {
 
 // ── Manual signal tests ───────────────────────────────────────────────────────
 
-// manualGW returns a gateway configured with MinRR=2.0 and a single allowed
-// source "finos" — matching the production aegis-exec default — so manual-path
-// tests run against realistic settings.
+// manualGW returns a gateway with a single allowed source "finos" — matching
+// the production aegis-exec default — so manual-path tests run against realistic
+// settings. It has no reward-to-risk floor of its own: none exists.
 func manualGW(t *testing.T, place aegis.PlaceFunc) aegis.Gateway {
 	t.Helper()
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources:     []string{"finos"},
-		MinRR:              2.0,
 		ExecutabilityCheck: aegis.AllExecutable, // focus the tests on the manual gates
 	})
 	if err != nil {
@@ -594,9 +594,9 @@ func manualGW(t *testing.T, place aegis.PlaceFunc) aegis.Gateway {
 	return gw
 }
 
-// manualBuySignal builds a BUY signal with RR ≈ 1.2 (below the 2.0 MinRR floor)
-// from source "finos". Setting Manual=true should cause this to be accepted;
-// leaving it false should cause rejection.
+// manualBuySignal builds a BUY signal with RR ≈ 1.2 from source "finos". With no
+// min_rr set it is accepted whether or not it is manual; a min_rr above 1.2 rejects
+// it either way.
 func manualBuySignal(id string, manual bool) aegis.TradeSignal {
 	// entry=1.0850, sl=1.0820 (30 pip stop), tp=1.0886 (36 pip target) → RR ≈ 1.2
 	return aegis.TradeSignal{
@@ -615,38 +615,80 @@ func manualBuySignal(id string, manual bool) aegis.TradeSignal {
 	}
 }
 
-// TestManual_LowRR_Accepted: Manual=true with RR below MinRR must be accepted
-// (RR floor bypassed for manual signals).
-func TestManual_LowRR_Accepted(t *testing.T) {
-	gw := manualGW(t, stubPlaceSource(t, "finos", true))
-	result, err := gw.Submit(context.Background(), manualBuySignal("manual-rr-ok-001", true))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.Accepted {
-		t.Errorf("Manual=true with low RR must be accepted, got: %s (code=%s)", result.Reason, result.Code)
-	}
-	if result.Code != aegis.ReasonPlaced {
-		t.Errorf("expected ReasonPlaced, got %q", result.Code)
+// There is no reward-to-risk floor of aegis's own: a low-RR trade goes through
+// unless the sender asked for a minimum.
+func TestNoBuiltInRRFloor_LowRRIsAcceptedManualOrNot(t *testing.T) {
+	for _, manual := range []bool{true, false} {
+		gw := manualGW(t, stubPlaceSource(t, "finos", true))
+		id := "rr-none-" + map[bool]string{true: "manual", false: "auto"}[manual]
+		result, err := gw.Submit(context.Background(), manualBuySignal(id, manual))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Accepted || result.Code != aegis.ReasonPlaced {
+			t.Errorf("manual=%v: with no min_rr a low-RR trade must be placed, got %+v", manual, result)
+		}
 	}
 }
 
-// TestManual_LowRR_NonManual_Rejected: regression guard — Manual=false with the
-// same low-RR levels must still be rejected by the RR floor.
-func TestManual_LowRR_NonManual_Rejected(t *testing.T) {
-	gw := manualGW(t, stubPlaceSource(t, "finos", false))
-	result, err := gw.Submit(context.Background(), manualBuySignal("manual-rr-reject-001", false))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// What the sender asks for is enforced, manual trades included.
+func TestMinRR_TheSendersMinimumIsEnforced(t *testing.T) {
+	for _, manual := range []bool{true, false} {
+		gw := manualGW(t, stubPlaceSource(t, "finos", true))
+		sig := manualBuySignal("rr-asked-"+map[bool]string{true: "manual", false: "auto"}[manual], manual)
+		sig.MinRR = 2 // the levels give about 1.2
+		result, err := gw.Submit(context.Background(), sig)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Accepted || result.Code != aegis.ReasonValidation {
+			t.Errorf("manual=%v: RR 1.2 against a requested 2 must be rejected, got %+v", manual, result)
+		}
+		if !strings.Contains(result.Reason, "RR") || !strings.Contains(result.Reason, "2.00") {
+			t.Errorf("the reason should name the ratio the sender asked for: %q", result.Reason)
+		}
 	}
-	if result.Accepted {
-		t.Error("Manual=false with low RR must be rejected (RR floor active)")
+}
+
+func TestMinRR_AtOrBelowWhatTheLevelsGiveIsAccepted(t *testing.T) {
+	for i, minRR := range []float64{0.5, 1.0, 1.2} { // the levels give ≈ 1.2
+		gw := manualGW(t, stubPlaceSource(t, "finos", true))
+		sig := manualBuySignal("rr-ok-"+string(rune('a'+i)), false)
+		sig.MinRR = minRR
+		if result, _ := gw.Submit(context.Background(), sig); !result.Accepted {
+			t.Errorf("min_rr %.2f is within what the levels give, got %+v", minRR, result)
+		}
 	}
-	if result.Code != aegis.ReasonValidation {
-		t.Errorf("expected ReasonValidation, got %q", result.Code)
+	// Exactly equal passes: 3:1 levels, 3 asked.
+	gw := manualGW(t, stubPlaceSource(t, "finos", true))
+	sig := manualBuySignal("rr-exact", false)
+	sig.Entry, sig.StopLoss, sig.TakeProfit = 100, 99, 103 // risk 1, reward 3: a ratio of exactly 3
+	sig.MinRR = 3
+	if result, _ := gw.Submit(context.Background(), sig); !result.Accepted {
+		t.Errorf("a ratio exactly equal to the minimum should pass, got %+v", result)
 	}
-	if !strings.Contains(result.Reason, "RR") {
-		t.Errorf("expected reason to mention RR, got: %q", result.Reason)
+}
+
+func TestMinRR_NonsenseIsRejectedAndDoesNotUseUpTheSignalID(t *testing.T) {
+	for name, v := range map[string]float64{"negative": -1, "nan": math.NaN(), "infinite": math.Inf(1)} {
+		placed := 0
+		gw := manualGW(t, func(context.Context, aegis.OrderIntent, string) (string, bool, error) {
+			placed++
+			return "x", true, nil
+		})
+		sig := manualBuySignal("rr-bad-"+name, false)
+		sig.MinRR = v
+		result, _ := gw.Submit(context.Background(), sig)
+		if result.Accepted || result.Code != aegis.ReasonValidation || !strings.Contains(result.Reason, "min_rr") {
+			t.Errorf("%s: want a validation rejection naming min_rr, got %+v", name, result)
+		}
+		if placed != 0 {
+			t.Errorf("%s: nothing may be placed", name)
+		}
+		sig.MinRR = 0 // corrected: the same id goes through
+		if result, _ := gw.Submit(context.Background(), sig); !result.Accepted {
+			t.Errorf("%s: the corrected signal with the same id should be accepted: %+v", name, result)
+		}
 	}
 }
 

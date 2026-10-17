@@ -141,7 +141,9 @@ func registerPlaceTrade(mcpSrv *server.MCPServer, gateway aegis.Gateway, cfg *co
 		mcp.WithNumber("stop_loss", mcp.Required(),
 			mcp.Description("Stop-loss price. BUY: below entry. SELL: above entry.")),
 		mcp.WithNumber("take_profit", mcp.Required(),
-			mcp.Description("Take-profit price. BUY: above entry. SELL: below entry. RR must be >= 1.5.")),
+			mcp.Description("Take-profit price. BUY: above entry. SELL: below entry.")),
+		mcp.WithNumber("min_rr",
+			mcp.Description("Optional. The smallest reward-to-risk ratio you will accept for this trade (reward distance divided by risk distance, e.g. 2 for 2:1). If the levels give less, the trade is rejected. Omit or 0 for no limit; aegis sets none of its own.")),
 		mcp.WithNumber("size", mcp.Required(),
 			mcp.Description("How much to trade. Forex and stocks: a whole number of units (e.g. 10000). Crypto: a quantity of the base asset (e.g. 0.05 for BTC). Must be > 0. Used exactly as given; a size the broker won't accept is skipped, never changed.")),
 		mcp.WithString("strategy", mcp.Required(),
@@ -241,6 +243,7 @@ func placeTradeHandler(gateway aegis.Gateway, cfg *config, logger *log.Logger) s
 			StopLoss:   stopLoss,
 			TakeProfit: takeProfit,
 			Size:       size,
+			MinRR:      req.GetFloat("min_rr", 0),
 			Note:       note,
 			Timestamp:  time.Now().Unix(),
 		}

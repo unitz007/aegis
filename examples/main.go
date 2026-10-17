@@ -8,8 +8,9 @@
 //                       returns the cached verdict without calling the broker.
 //  3. REJECT (stock)  — AAPL is classified as "stock", which DefaultExecutability
 //                       rejects before the signal_id slot is even reserved.
-//  4. REJECT (RR)     — a GBPUSD signal with RR below the 1.5 floor is
-//                       rejected during content validation.
+//  4. REJECT (RR)     — a GBPUSD signal whose reward-to-risk is below the
+//                       min_rr the sender asked for is rejected. aegis has no
+//                       ratio of its own: without min_rr nothing is checked.
 //
 // Additionally the example constructs (but does not serve) the MCP and webhook
 // HTTP handlers to show how transports are mounted on a standard http.ServeMux.
@@ -68,7 +69,6 @@ func main() {
 	//
 	// NewGateway accepts a PlaceFunc (the executor's ExecuteWithResult) and a
 	// GatewayConfig.  All zero GatewayConfig fields apply safe defaults:
-	//   MinRR              → 1.5
 	//   IdempotencyTTL     → 10 minutes
 	//   SymbolClassifier   → ClassifySymbolDefault   (pure function, no network)
 	//   ExecutabilityCheck → DefaultExecutability    (forex + core-algo crypto only;
@@ -83,7 +83,6 @@ func main() {
 			AllowedSources: []string{
 				"demo-agent", // the source tag used in the signals below
 			},
-			MinRR: 1.5, // reject signals whose reward:risk < 1.5
 			// Strategy is free-text provenance — not validated. Callers may pass
 			// any string (e.g. "smc", "topdown", "my-experiment-v3").
 			// Logger and Clock left nil → use log.Default() and time.Now.
@@ -176,12 +175,13 @@ func main() {
 	printResult("REJECT(stock)", r3, err)
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// Scenario 4 — REJECT: insufficient RR
+	// Scenario 4 — REJECT: below the reward-to-risk the sender asked for
 	//   GBPUSD BUY with RR = (1.2680-1.2640)/(1.2640-1.2620) = 0.0040/0.0020
-	//   = 2.0 — passes.  We deliberately set TP too close so RR = 1.2 < 1.5.
+	//   = 2.0 — passes.  We deliberately set TP too close so RR = 1.2, and the sender
+	//   asks for at least 1.5 (min_rr), so it is rejected.
 	//   RR = (1.2652-1.2640)/(1.2640-1.2630) = 0.0012/0.0010 = 1.2 → rejected.
 	// ═══════════════════════════════════════════════════════════════════════════
-	fmt.Println("─── Scenario 4: GBPUSD BUY rejected (RR below floor) ─────────────────")
+	fmt.Println("─── Scenario 4: GBPUSD BUY rejected (below the min_rr asked for) ─────────────────")
 	r4, err := gw.Submit(ctx, aegis.TradeSignal{
 		Source:     "demo-agent",
 		Strategy:   "smc",
@@ -191,7 +191,8 @@ func main() {
 		OrderType:  "limit",
 		Entry:      1.2640,
 		StopLoss:   1.2630, // 10-pip SL
-		TakeProfit: 1.2652, // 12-pip TP → RR 1.2 < 1.5
+		TakeProfit: 1.2652, // 12-pip TP → RR 1.2
+		MinRR:      1.5,    // the sender wants at least 1.5, so this is rejected
 		Size:       10000, // units: the caller decides how much
 		Timestamp:  time.Now().Unix(),
 	})

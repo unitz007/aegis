@@ -469,3 +469,30 @@ func TestSanitizeIdempotencyKey_AllInvalid(t *testing.T) {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
+
+// The minimum reward-to-risk the caller asks for reaches the gateway unchanged,
+// and when they don't ask, none is invented.
+func TestPlaceTrade_MinRRIsPassedThroughAsSent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(a map[string]any)
+		want float64
+	}{
+		{"asked", func(a map[string]any) { a["min_rr"] = 2.5 }, 2.5},
+		{"not asked", func(a map[string]any) {}, 0},
+	} {
+		gw := newStubGateway([]string{"smc_engine"}, aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
+		h := placeTradeHandler(gw, defaultConfig("claude"), nil)
+		args := validArgs()
+		tc.set(args)
+		if _, err := h(context.Background(), callReq(args)); err != nil {
+			t.Fatal(err)
+		}
+		if gw.count() != 1 {
+			t.Fatalf("%s: want 1 submit, got %d", tc.name, gw.count())
+		}
+		if got := gw.last().MinRR; got != tc.want {
+			t.Errorf("%s: min_rr reached the gateway as %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

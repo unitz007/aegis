@@ -35,7 +35,7 @@ func TestEndToEnd_TradeLandsOnTheRequestedAccount(t *testing.T) {
 		return def.ExecuteWithResult(ctx, in, id)
 	}
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources: []string{"finos"}, MinRR: 1.5,
+		AllowedSources: []string{"finos"},
 		SymbolClassifier: aegis.ClassifySymbolDefault, ExecutabilityCheck: aegis.DefaultExecutability,
 	})
 	if err != nil {
@@ -104,7 +104,7 @@ func TestEndToEnd_LoginIsNeverReadableOnTheWire_AndUnknownBrokersAreRefused(t *t
 		}
 		return "", false, nil
 	}
-	gw, _ := aegis.NewGateway(place, aegis.GatewayConfig{AllowedSources: []string{"finos"}, MinRR: 1.5,
+	gw, _ := aegis.NewGateway(place, aegis.GatewayConfig{AllowedSources: []string{"finos"},
 		SymbolClassifier: aegis.ClassifySymbolDefault, ExecutabilityCheck: aegis.DefaultExecutability})
 	const secret = "s3cret"
 	h := webhook.Handler(secret, gw, webhook.WithSourceTag("finos"), webhook.WithAccountResolver(r.a.resolve))

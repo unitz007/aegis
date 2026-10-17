@@ -43,11 +43,16 @@ type TradeSignal struct {
 	Note       string  `json:"note"`
 	Timestamp  int64   `json:"timestamp"` // unix seconds
 	// Manual=true marks a human-placed discretionary trade. aegis will PLACE the
-	// order (at the size given) but will BYPASS the RR floor, session veto, and confidence
-	// gate. Structural validity (direction-consistent levels, entry/stop/tp > 0)
-	// and idempotency still apply. The source allowlist is also still enforced —
-	// Manual is a bypass flag, not an authentication mechanism.
+	// order (at the size given) but will BYPASS the session veto and confidence
+	// gate. Structural validity (direction-consistent levels, entry/stop/tp > 0),
+	// any MinRR the sender set, and idempotency still apply. The source allowlist is
+	// also still enforced — Manual is a bypass flag, not an authentication mechanism.
 	Manual bool `json:"manual,omitempty"`
+	// MinRR is the smallest reward-to-risk ratio the SENDER will accept for this
+	// trade (reward distance ÷ risk distance). aegis has no ratio of its own: it
+	// enforces only what the user asked for. 0 or absent means no limit. A value
+	// that is negative or not a number is rejected. It applies to Manual trades too.
+	MinRR float64 `json:"min_rr,omitempty"`
 	// Size is how much to trade, decided by the caller; aegis never works it out.
 	// Forex and stocks: a whole number of units. Crypto: a quantity of the base
 	// asset (for example 0.05 BTC). Required, > 0. It is used exactly as given or
@@ -75,7 +80,7 @@ const (
 	// Maps to HTTP 409.
 	ReasonInFlight SignalReasonCode = "in_flight"
 
-	// ReasonValidation — failed allowlist / symbol / level / RR / signal_id
+	// ReasonValidation — failed allowlist / symbol / level / min_rr / signal_id
 	// validation. Maps to HTTP 400.
 	ReasonValidation SignalReasonCode = "validation"
 )
@@ -112,8 +117,8 @@ type OrderIntent struct {
 	// (LLM-sourced decisions). Gateway-submitted signals default to 60.
 	Confidence int
 	// Manual=true bypasses the session veto and confidence gate in the executor.
-	// It is propagated from TradeSignal.Manual. The RR floor is bypassed at the
-	// gateway (validateSignal) before OrderIntent is constructed.
+	// It is propagated from TradeSignal.Manual. Nothing about reward-to-risk is
+	// bypassed: the sender's own min_rr (if any) applies to manual trades too.
 	Manual bool
 	// Size is the caller's position size, passed through untouched: whole units for
 	// forex and stocks, a base-asset quantity for crypto.
@@ -126,7 +131,7 @@ type OrderIntent struct {
 
 // Gateway is the unified submission interface for trade signals.
 // A single Submit call owns: allowlist validation (source only), signal content
-// validation, RR floor, idempotency (atomic reserve), OrderIntent construction,
+// validation, the sender's own min_rr, idempotency (atomic reserve), OrderIntent construction,
 // and delegation to the Executor via PlaceFunc.
 // Strategy is free-text provenance — it is accepted as-is and never validated.
 type Gateway interface {
@@ -156,10 +161,6 @@ type GatewayConfig struct {
 	// AllowedSources is the set of source strings the Gateway accepts.
 	// Empty = reject all (fail-closed). Callers must populate this.
 	AllowedSources []string
-
-	// MinRR is the minimum reward-to-risk ratio a signal must satisfy.
-	// Default: 1.5.
-	MinRR float64
 
 	// IdempotencyTTL bounds how long a completed signal_id reservation is
 	// remembered. Default: 10 minutes.
@@ -196,9 +197,6 @@ func (c GatewayConfig) allowedSourcesSet() map[string]struct{} {
 func NewGateway(place PlaceFunc, cfg GatewayConfig) (Gateway, error) {
 	if place == nil {
 		return nil, fmt.Errorf("aegis: NewGateway: place func must be non-nil")
-	}
-	if cfg.MinRR <= 0 {
-		cfg.MinRR = 1.5
 	}
 	if cfg.IdempotencyTTL <= 0 {
 		cfg.IdempotencyTTL = 10 * time.Minute
@@ -415,20 +413,17 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 		}
 	}
 
-	// RR floor — skipped for manual signals (human discretion owns the R:R decision).
-	if !sig.Manual {
-		slDist := sig.Entry - sig.StopLoss
-		if slDist < 0 {
-			slDist = -slDist
-		}
-		tpDist := sig.TakeProfit - sig.Entry
-		if tpDist < 0 {
-			tpDist = -tpDist
-		}
+	// Reward-to-risk: aegis has no floor of its own. It only enforces the minimum the
+	// sender asked for on this trade (sig.MinRR), and that applies to manual trades too.
+	if math.IsNaN(sig.MinRR) || math.IsInf(sig.MinRR, 0) || sig.MinRR < 0 {
+		return reject("min_rr must be a number, 0 or more")
+	}
+	if sig.MinRR > 0 {
+		slDist := math.Abs(sig.Entry - sig.StopLoss)
+		tpDist := math.Abs(sig.TakeProfit - sig.Entry)
 		if slDist > 0 {
-			rr := tpDist / slDist
-			if rr < g.cfg.MinRR {
-				return reject(fmt.Sprintf("RR %.2f below minimum %.2f", rr, g.cfg.MinRR))
+			if rr := tpDist / slDist; rr < sig.MinRR {
+				return reject(fmt.Sprintf("RR %.2f is below the minimum you set (%.2f)", rr, sig.MinRR))
 			}
 		}
 	}

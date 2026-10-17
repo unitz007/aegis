@@ -109,9 +109,11 @@ type signalRequest struct {
 	Strategy string `json:"strategy"`
 	Note     string `json:"note"`
 	// Manual=true marks a human-placed discretionary trade. When set, the gateway
-	// bypasses the RR floor, and the executor bypasses the session veto and
-	// confidence gate. Structural validity and the source allowlist still apply.
+	// bypasses the session veto and confidence gate in the executor. Structural validity and the source allowlist still apply.
 	Manual bool `json:"manual,omitempty"`
+	// MinRR is the smallest reward-to-risk the sender will accept for this trade.
+	// aegis has no ratio of its own; absent or 0 means no limit.
+	MinRR float64 `json:"min_rr,omitempty"`
 	// Size is how much to trade, chosen by the caller (aegis never sizes a trade):
 	// whole units for forex and stocks, a base-asset quantity for crypto. Required.
 	Size float64 `json:"size"`
@@ -265,6 +267,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Timestamp:  req.Timestamp,
 		Manual:     req.Manual,
 		Size:       req.Size,
+		MinRR:      req.MinRR,
 	}
 
 	// ── Submit to the gateway (single business path) ──────────────────────────

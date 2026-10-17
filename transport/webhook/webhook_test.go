@@ -609,3 +609,29 @@ func TestAccountCheck(t *testing.T) {
 		t.Errorf("no secret must fail closed: %d", rec.Code)
 	}
 }
+
+// The minimum reward-to-risk the sender asks for reaches the gateway unchanged,
+// and when they don't ask, none is invented.
+func TestWebhook_MinRRIsPassedThroughAsSent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func(m map[string]any)
+		want float64
+	}{
+		{"asked", func(m map[string]any) { m["min_rr"] = 2.5 }, 2.5},
+		{"not asked", func(m map[string]any) {}, 0},
+	} {
+		gw := newGW(aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
+		h := Handler(testSecret, gw)
+		body := validBody()
+		tc.body(body)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, makeRequest(t, testSecret, body))
+		if gw.count() != 1 {
+			t.Fatalf("%s: want 1 gateway call, got %d (%d %s)", tc.name, gw.count(), rec.Code, rec.Body.String())
+		}
+		if got := gw.last().MinRR; got != tc.want {
+			t.Errorf("%s: min_rr reached the gateway as %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

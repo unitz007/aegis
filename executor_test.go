@@ -466,7 +466,6 @@ func TestDefaultExecutability_StockRejected_NoSlotConsumed(t *testing.T) {
 	// Use DefaultExecutability (the default — no explicit check needed).
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
 		AllowedSources: []string{"test-agent"},
-		MinRR:          1.5,
 		// ExecutabilityCheck is intentionally omitted → defaults to DefaultExecutability.
 	})
 	if err != nil {

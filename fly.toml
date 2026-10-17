@@ -18,5 +18,4 @@ primary_region = "lhr"
 [env]
   BROKER_MODE       = "capital"
   ALLOWED_SOURCES   = "finos"
-  MIN_RR            = "2.0"
   MIN_CONFIDENCE    = "45"
