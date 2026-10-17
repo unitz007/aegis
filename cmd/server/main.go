@@ -16,6 +16,16 @@
 //	ALLOWED_SOURCES        comma-separated source tags accepted by the Gateway (default "finos")
 //	MIN_CONFIDENCE         minimum LLM confidence for non-algo pairs (default 45)
 //
+// Hard safety limits (apply whatever a sender asks; 0 switches one off, negative stops startup):
+//
+//	MAX_UNITS              largest single forex/stock trade, whole units (default 100000)
+//	MAX_CRYPTO_VALUE       largest single crypto trade by value, quantity × entry (default 10000)
+//	MAX_OPEN_POSITIONS     most open trades + waiting orders per account (default 5)
+//	MAX_TRADES_PER_DAY     most new trades per account per UTC day (default 10)
+//	MAX_DAILY_LOSS         stop new trades once an account is down this much today, in its currency (default 1000)
+//	TRADING_PAUSED         "true" starts with trading paused
+//	ADMIN_TOKEN            enables /admin/status, /admin/pause, /admin/resume (bearer token); unset = no admin routes
+//
 // Safety invariants:
 //   - BROKER_MODE defaults to "paper" — live money requires an explicit opt-in.
 //   - If BROKER_MODE=capital but any credential is empty → log.Fatal (fail-closed;
@@ -100,10 +110,24 @@ func main() {
 		log.Fatalf("server: unknown BROKER_MODE=%q — must be 'paper' or 'capital'", brokerMode)
 	}
 
+	// ── Safety limits and the pause switch ────────────────────────────────────────
+	limits, err := loadLimits(os.Getenv)
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
+	guard := aegis.NewGuard(nil)
+	if startPaused() {
+		guard.Pause("starting paused")
+		log.Printf("server: TRADING_PAUSED=true — no trades will be placed until /admin/resume")
+	}
+	log.Printf("server: limits %s", describeLimits(limits))
+
 	// ── Executor ──────────────────────────────────────────────────────────────────
 	exec := &aegis.Executor{
 		Broker:        brokerImpl,
 		BrokerName:    brokerName,
+		Limits:        limits,
+		Guard:         guard,
 		MinConfidence: minConfidence,
 		SessionGate:   StockAISessionGate,
 		Journal:       nil, // finOS owns the journal in remote mode
@@ -173,6 +197,12 @@ func main() {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}
 
+	// /admin/ — owner's pause switch and status. Off unless ADMIN_TOKEN is set.
+	if adminToken := os.Getenv("ADMIN_TOKEN"); adminToken != "" {
+		mux.Handle("/admin/", adminHandler(adminToken, guard, limits))
+		log.Printf("server: admin routes enabled (/admin/status, /admin/pause, /admin/resume)")
+	}
+
 	// /mcp/ — MCP Streamable-HTTP bearer-auth
 	mcpHandler := aegismcp.Handler(
 		mcpAuthToken,
@@ -190,6 +220,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"mode":        "ok",
 			"broker_mode": brokerMode,
+			"trading":     tradingState(guard),
 		})
 	})
 
@@ -239,4 +270,12 @@ func splitNonEmpty(s string) []string {
 		}
 	}
 	return out
+}
+
+// tradingState is "on" or "paused", for the public health check.
+func tradingState(g *aegis.Guard) string {
+	if paused, _, _ := g.Status(); paused {
+		return "paused"
+	}
+	return "on"
 }

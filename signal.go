@@ -338,7 +338,11 @@ func (g *signalGateway) Submit(ctx context.Context, sig TradeSignal) (SignalResu
 
 	brokerOrderID, placed, err := g.place(ctx, intent, decisionID)
 
-	if err != nil {
+	if refusal, ok := AsRefusal(err); ok {
+		// A deliberate "no" from a safety limit: say so in plain words, not as a fault.
+		g.cfg.Logger.Printf("aegis gateway: refused %s/%s: %s", sig.Source, sig.SignalID, refusal.Why)
+		result = SignalResult{Accepted: true, Placed: false, Reason: refusal.Why, Code: ReasonExecutorSkip}
+	} else if err != nil {
 		g.cfg.Logger.Printf("aegis gateway: executor error for %s/%s: %v", sig.Source, sig.SignalID, err)
 		result = SignalResult{
 			Accepted: true,
