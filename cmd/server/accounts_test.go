@@ -338,7 +338,7 @@ func TestBrokersHandler_WireFormatIsStable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw.Brokers) != 1 {
 		t.Fatalf("%v %s", err, rec.Body.String())
 	}
-	for _, k := range []string{"name", "label", "envs", "fields"} {
+	for _, k := range []string{"name", "label", "strategy", "envs", "fields"} {
 		if _, ok := raw.Brokers[0][k]; !ok {
 			t.Errorf("broker is missing %q: %s", k, rec.Body.String())
 		}

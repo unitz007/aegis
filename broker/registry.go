@@ -11,6 +11,19 @@ import (
 // (for example api_key, email, password).
 type Credentials map[string]string
 
+// Connection strategies: HOW a person connects an account to a broker. Brokers
+// differ here, so each declares its own, and a client (Kael) handles each kind once.
+//
+//	StrategyFields — the person types in login details (API key, email, password, an
+//	                 account number…). Fields lists exactly what to ask for.
+//
+// A strategy a client doesn't know is simply not offered to it. To support another
+// kind (for example "sign in with the broker" through OAuth) add its constant here,
+// teach Register what it needs, and add a handler for it in the client.
+const StrategyFields = "fields"
+
+var knownStrategies = map[string]bool{StrategyFields: true}
+
 // Field is one detail a broker login needs, described so a screen can ask for it.
 type Field struct {
 	Name   string `json:"name"`           // what it is called on the wire, e.g. "api_key"
@@ -22,10 +35,11 @@ type Field struct {
 // Info is what is safe to tell anyone about a registered broker: enough to build
 // a connect screen, nothing about any account.
 type Info struct {
-	Name   string   `json:"name"`
-	Label  string   `json:"label"`
-	Envs   []string `json:"envs"`
-	Fields []Field  `json:"fields"`
+	Name     string   `json:"name"`
+	Label    string   `json:"label"`
+	Strategy string   `json:"strategy"` // how a person connects: see StrategyFields
+	Envs     []string `json:"envs"`
+	Fields   []Field  `json:"fields"` // for StrategyFields: the details to ask for
 }
 
 // Spec describes a broker aegis is willing to trade on: what to call it, which
@@ -35,6 +49,9 @@ type Spec struct {
 	Name string
 	// Label is the name a person sees ("Capital.com"). Defaults to Name.
 	Label string
+	// Strategy is how a person connects an account to this broker. Defaults to
+	// StrategyFields. An unknown strategy is refused at registration.
+	Strategy string
 	// Envs lists the environments the broker has, such as "demo" and "live".
 	Envs []string
 	// Fields lists every credential a login needs. A request that is missing one,
@@ -74,6 +91,12 @@ func (r *Registry) Register(s Spec) error {
 	}
 	if strings.TrimSpace(s.Label) == "" {
 		s.Label = s.Name
+	}
+	if strings.TrimSpace(s.Strategy) == "" {
+		s.Strategy = StrategyFields
+	}
+	if !knownStrategies[s.Strategy] {
+		return fmt.Errorf("broker %q: unknown way of connecting %q", s.Name, s.Strategy)
 	}
 	fields := map[string]bool{}
 	for i, f := range s.Fields {
@@ -165,7 +188,7 @@ func (r *Registry) List(allowEnv func(env string) bool) []Info {
 		if len(envs) == 0 {
 			continue
 		}
-		out = append(out, Info{Name: s.Name, Label: s.Label, Envs: envs, Fields: append([]Field(nil), s.Fields...)})
+		out = append(out, Info{Name: s.Name, Label: s.Label, Strategy: s.Strategy, Envs: envs, Fields: append([]Field(nil), s.Fields...)})
 	}
 	return out
 }

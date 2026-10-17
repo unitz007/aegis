@@ -98,3 +98,20 @@ func TestRegistry_ListDescribesBrokersAndHonoursTheEnvFilter(t *testing.T) {
 		t.Error("List must return a copy")
 	}
 }
+
+func TestRegistry_EveryBrokerHasAWayOfConnecting(t *testing.T) {
+	r := NewRegistry()
+	r.Register(okSpec("a")) //nolint:errcheck
+	spec, _ := r.Get("a")
+	if spec.Strategy != StrategyFields {
+		t.Errorf("the default way of connecting is typing in details, got %q", spec.Strategy)
+	}
+	odd := okSpec("b")
+	odd.Strategy = "carrier-pigeon"
+	if err := r.Register(odd); err == nil {
+		t.Error("a way of connecting nobody can handle must be refused at registration")
+	}
+	if list := r.List(nil); len(list) != 1 || list[0].Strategy != StrategyFields {
+		t.Errorf("the list should say how each broker connects: %+v", list)
+	}
+}
