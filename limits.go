@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -12,25 +13,86 @@ import (
 
 // ── Safety limits ─────────────────────────────────────────────────────────────
 //
-// Whatever a sender asks, aegis will not go past these. They exist so that a
-// mistake upstream (a wrong size, a runaway loop, a bad day) costs a little, not
-// everything. Zero switches a limit off.
+// Aegis has no limits of its own, just as it has no reward-to-risk floor and never
+// sizes a trade. The person trading chooses their limits and the sender passes them
+// with each trade request, exactly like min_rr; aegis holds the line on whatever it
+// is given. A mistake upstream (a wrong size, a runaway loop, a bad day) then costs
+// no more than the person said they could afford.
 
-// Limits are the hard ceilings on what aegis will place.
+// Limits are one person's own ceilings, sent with a trade request. Zero or absent means
+// that limit is not set.
 type Limits struct {
 	// MaxUnits is the largest single forex or stock trade, in whole units.
-	MaxUnits int
+	MaxUnits int `json:"max_units,omitempty"`
 	// MaxCryptoValue is the largest single crypto trade by value: quantity × entry
 	// price, in the instrument's quote currency (USD for the usual pairs).
-	MaxCryptoValue float64
-	// MaxOpenPositions is the most open trades plus waiting orders one account may have.
-	MaxOpenPositions int
-	// MaxTradesPerDay is the most new trades one account may get per UTC day.
-	MaxTradesPerDay int
+	MaxCryptoValue float64 `json:"max_crypto_value,omitempty"`
+	// MaxOpenPositions is the most open trades plus waiting orders the account may have.
+	MaxOpenPositions int `json:"max_open_positions,omitempty"`
+	// MaxTradesPerDay is the most new trades the account may get per UTC day.
+	MaxTradesPerDay int `json:"max_trades_per_day,omitempty"`
 	// MaxDailyLoss, in the account's own currency, stops new trades for the rest of the
 	// UTC day once the account is down this much from the value aegis first saw today.
 	// (Aegis keeps no history, so a restart starts a fresh day-start value.)
-	MaxDailyLoss float64
+	MaxDailyLoss float64 `json:"max_daily_loss,omitempty"`
+}
+
+// Validate reports a limit that is negative or not a number.
+func (l Limits) Validate() error {
+	bad := func(name string, v float64) error {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return fmt.Errorf("%s must be a number, 0 or more", name)
+		}
+		return nil
+	}
+	for _, c := range []struct {
+		name string
+		v    float64
+	}{
+		{"max_units", float64(l.MaxUnits)}, {"max_crypto_value", l.MaxCryptoValue},
+		{"max_open_positions", float64(l.MaxOpenPositions)}, {"max_trades_per_day", float64(l.MaxTradesPerDay)},
+		{"max_daily_loss", l.MaxDailyLoss},
+	} {
+		if err := bad(c.name, c.v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tighten combines two sets of limits, keeping the stricter value of each that is set.
+// Used when a library user configures ceilings on the Executor as well as the sender
+// passing the person's own.
+func tighten(a, b Limits) Limits {
+	minInt := func(x, y int) int {
+		switch {
+		case x == 0:
+			return y
+		case y == 0:
+			return x
+		case x < y:
+			return x
+		}
+		return y
+	}
+	minF := func(x, y float64) float64 {
+		switch {
+		case x == 0:
+			return y
+		case y == 0:
+			return x
+		case x < y:
+			return x
+		}
+		return y
+	}
+	return Limits{
+		MaxUnits:         minInt(a.MaxUnits, b.MaxUnits),
+		MaxCryptoValue:   minF(a.MaxCryptoValue, b.MaxCryptoValue),
+		MaxOpenPositions: minInt(a.MaxOpenPositions, b.MaxOpenPositions),
+		MaxTradesPerDay:  minInt(a.MaxTradesPerDay, b.MaxTradesPerDay),
+		MaxDailyLoss:     minF(a.MaxDailyLoss, b.MaxDailyLoss),
+	}
 }
 
 // Refusal is an executor "no" that the sender should hear about in plain words. It is
@@ -144,11 +206,11 @@ func (e *Executor) checkPaused() error {
 	return nil
 }
 
-// checkLimits applies the size and account limits to a trade that is otherwise ready
-// to go. It returns the account key to record the trade against once it is placed.
+// checkLimits applies the person's limits (sent with the request) to a trade that is
+// otherwise ready to go. It returns the account key to record the trade against once it is placed.
 // Anything it cannot check it refuses: a limit that might not hold is not a limit.
 func (e *Executor) checkLimits(ctx context.Context, intent OrderIntent, openTrades []broker.OpenTrade, openOrders []broker.OpenOrder) (account string, err error) {
-	lim := e.Limits
+	lim := tighten(e.Limits, intent.Limits)
 
 	if intent.AssetClass == "crypto" {
 		if lim.MaxCryptoValue > 0 {

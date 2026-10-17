@@ -6,6 +6,7 @@ package aegis_test
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +227,62 @@ func TestGateway_ALimitRefusalReadsInPlainWords(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.Reason, "That trade is bigger than the largest allowed") || strings.Contains(res.Reason, "executor error") {
 		t.Errorf("plain reason expected: %q", res.Reason)
+	}
+}
+
+// ── The limits are the person's own: they arrive with the trade ──────────────
+
+func TestLimits_TheSendersOwnLimitsAreEnforcedWithNoServerLimitsAtAll(t *testing.T) {
+	b := openStub()
+	e := &aegis.Executor{Broker: b, BrokerName: "stub", MinConfidence: 45} // nothing configured on aegis
+	intent := fxIntent(250_000)
+	intent.Limits = aegis.Limits{MaxUnits: 100_000}
+	_, placed, err := e.ExecuteWithResult(context.Background(), intent, "own1")
+	mustRefuse(t, err, "100000 units")
+	if placed || b.placeCalled != 0 {
+		t.Fatal("the person's own ceiling must hold")
+	}
+	intent.Size = 100_000
+	if _, placed, err := e.ExecuteWithResult(context.Background(), intent, "own2"); err != nil || !placed {
+		t.Fatalf("within their own ceiling: placed=%v err=%v", placed, err)
+	}
+}
+
+func TestLimits_WhenBothAreSetTheStricterWins(t *testing.T) {
+	b := openStub()
+	e := limitedExec(b, aegis.Limits{MaxUnits: 50_000}, nil) // a library user's ceiling
+	intent := fxIntent(30_000)
+	intent.Limits = aegis.Limits{MaxUnits: 20_000} // the person's, stricter
+	_, _, err := e.ExecuteWithResult(context.Background(), intent, "s1")
+	mustRefuse(t, err, "20000 units")
+	intent.Limits = aegis.Limits{MaxUnits: 90_000} // the person's, looser: the library's still holds
+	intent.Size = 60_000
+	_, _, err = e.ExecuteWithResult(context.Background(), intent, "s2")
+	mustRefuse(t, err, "50000 units")
+}
+
+func TestGateway_LimitsAreValidatedAndHandedToTheExecutor(t *testing.T) {
+	var got aegis.Limits
+	gw := defaultGW(t, func(_ context.Context, in aegis.OrderIntent, _ string) (string, bool, error) {
+		got = in.Limits
+		return "o1", true, nil
+	})
+	sig := buySignal("sig-lim-ok")
+	sig.Limits = aegis.Limits{MaxUnits: 5000, MaxTradesPerDay: 2}
+	if res, _ := gw.Submit(context.Background(), sig); !res.Placed || got != sig.Limits {
+		t.Fatalf("limits must reach the executor: %+v got=%+v", res, got)
+	}
+	for name, bad := range map[string]aegis.Limits{
+		"negative units": {MaxUnits: -1},
+		"negative loss":  {MaxDailyLoss: -5},
+		"NaN value":      {MaxCryptoValue: math.NaN()},
+		"infinite loss":  {MaxDailyLoss: math.Inf(1)},
+	} {
+		s := buySignal("sig-lim-" + strings.ReplaceAll(name, " ", "-"))
+		s.Limits = bad
+		res, _ := gw.Submit(context.Background(), s)
+		if res.Accepted || res.Code != aegis.ReasonValidation {
+			t.Errorf("%s must be rejected, got %+v", name, res)
+		}
 	}
 }

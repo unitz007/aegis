@@ -496,3 +496,26 @@ func TestPlaceTrade_MinRRIsPassedThroughAsSent(t *testing.T) {
 		}
 	}
 }
+
+// The caller's own limits reach the gateway unchanged; none are invented.
+func TestPlaceTrade_LimitsArePassedThroughAsSentAndNeverInvented(t *testing.T) {
+	gw := newStubGateway([]string{"smc_engine"}, aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
+	h := placeTradeHandler(gw, defaultConfig("claude"), nil)
+	args := validArgs()
+	args["max_units"], args["max_open_positions"], args["max_trades_per_day"], args["max_daily_loss"], args["max_crypto_value"] = 20000.0, 2.0, 3.0, 150.0, 800.0
+	if _, err := h(context.Background(), callReq(args)); err != nil {
+		t.Fatal(err)
+	}
+	want := aegis.Limits{MaxUnits: 20000, MaxOpenPositions: 2, MaxTradesPerDay: 3, MaxDailyLoss: 150, MaxCryptoValue: 800}
+	if got := gw.last().Limits; got != want {
+		t.Errorf("limits reached the gateway as %+v, want %+v", got, want)
+	}
+
+	gw2 := newStubGateway([]string{"smc_engine"}, aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
+	if _, err := placeTradeHandler(gw2, defaultConfig("claude"), nil)(context.Background(), callReq(validArgs())); err != nil {
+		t.Fatal(err)
+	}
+	if got := gw2.last().Limits; got != (aegis.Limits{}) {
+		t.Errorf("no limits sent must mean none: %+v", got)
+	}
+}

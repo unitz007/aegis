@@ -226,23 +226,25 @@ The defaults for `SymbolClassifier` and `ExecutabilityCheck` were chosen to matc
 
 - **Validation runs before slot reservation.** Allowlist, content, RR-floor, and executability checks all run before `getOrReserve` — a rejected signal never burns an idempotency slot.
 
-### Hard limits and the pause switch
+### The person's own limits, and the pause switch
 
-Whatever a sender asks, aegis will not go past these. They live in `Executor.Limits` and are set by the server from the environment (`0` switches one off; a negative or non-numeric value stops startup, so a typo can never silently remove a limit):
+Aegis has **no limits of its own**, just as it has no reward-to-risk floor and never sizes a trade. The person trading chooses their limits, and the sender passes them with each trade request, like `min_rr`. Aegis holds the line on whatever it is given and refuses a trade that would go past it. Absent or `0` means that limit is not set.
 
-| Setting | Default | What it stops |
-|---|---|---|
-| `MAX_UNITS` | 100000 | a single forex/stock trade larger than this many units |
-| `MAX_CRYPTO_VALUE` | 10000 | a single crypto trade whose quantity × entry price is larger than this |
-| `MAX_OPEN_POSITIONS` | 5 | a new trade when the account already has this many open trades + waiting orders |
-| `MAX_TRADES_PER_DAY` | 10 | more new trades than this per account per UTC day |
-| `MAX_DAILY_LOSS` | 1000 | new trades for the rest of the UTC day once the account is down this much (in its own currency) from the value aegis first saw that day |
+Send them in the request as `limits` (webhook) or as the matching optional tool inputs (MCP):
 
-A trade over a limit is **refused, never shrunk**, and the sender is told why in plain words (for example "That trade is bigger than the largest allowed (100000 units), so nothing was placed."). A limit that cannot be checked (the account can't be read) refuses too. Counts and day-start values are per account and shared by every executor through one `Guard`, so a person's own account is held to the same limits as the default one. The daily-loss baseline is kept in memory: a restart begins a fresh day-start value.
+| Field | What it stops |
+|---|---|
+| `max_units` | a single forex/stock trade larger than this many units |
+| `max_crypto_value` | a single crypto trade whose quantity × entry price is larger than this |
+| `max_open_positions` | a new trade when the account already has this many open trades + waiting orders |
+| `max_trades_per_day` | more new trades than this on the account per UTC day |
+| `max_daily_loss` | new trades for the rest of the UTC day once the account is down this much (in its own currency) from the value aegis first saw that day |
 
-**Pause switch.** `Guard.Pause(reason)` stops every new trade, on every account, before the broker is even asked; closing existing trades is unaffected. Start paused with `TRADING_PAUSED=true`. With `ADMIN_TOKEN` set, the server also serves (bearer token required):
+A trade over a limit is **refused, never shrunk**, and the sender is told why in plain words (for example "That trade is bigger than the largest allowed (100000 units), so nothing was placed."). A negative or non-numeric limit is rejected as invalid. A limit that cannot be checked (the account can't be read) refuses too. Day counts and day-start values are kept per account, shared across every executor, in memory: a restart begins a fresh day. Library users may also set `Executor.Limits`; when both are set the stricter value of each applies.
 
-- `GET /admin/status` — whether trading is paused, and the active limits
+**Pause switch.** The one safety control aegis owns, because it has no values to choose. `Guard.Pause(reason)` stops every new trade, on every account, before the broker is even asked; closing existing trades is unaffected. Start paused with `TRADING_PAUSED=true`. With `ADMIN_TOKEN` set, the server also serves (bearer token required):
+
+- `GET /admin/status` — whether trading is paused
 - `POST /admin/pause` — body `{"reason": "optional short note"}`
 - `POST /admin/resume`
 

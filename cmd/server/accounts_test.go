@@ -359,16 +359,16 @@ func TestBrokersHandler_WireFormatIsStable(t *testing.T) {
 	}
 }
 
-// A person's own account gets its own executor, but the ceilings and the pause switch are
-// the server's: they must carry over, and the pause must stop every account at once.
-func TestResolve_EveryAccountInheritsTheLimitsAndSharesThePauseSwitch(t *testing.T) {
+// A person's own account gets its own executor, but the pause switch is the server's: it
+// must stop every account at once. Their own limits arrive with their trade requests.
+func TestResolve_EveryAccountSharesThePauseSwitchAndHonoursItsOwnersLimits(t *testing.T) {
 	priv, pub, err := sealed.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	built := new(int)
 	guard := aegis.NewGuard(nil)
-	template := aegis.Executor{MinConfidence: 45, Limits: aegis.Limits{MaxUnits: 5_000}, Guard: guard}
+	template := aegis.Executor{MinConfidence: 45, Guard: guard}
 	r := &rig{a: newAccounts(template, testRegistry(built, map[string]*paper.Broker{}), priv, false), public: pub, built: built}
 
 	ctx, _, err := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
@@ -376,10 +376,10 @@ func TestResolve_EveryAccountInheritsTheLimitsAndSharesThePauseSwitch(t *testing
 		t.Fatal(err)
 	}
 	e, _ := executorFrom(ctx)
-	intent := aegis.OrderIntent{Symbol: "EURUSD", AssetClass: "forex", Direction: "BUY", OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.12, Size: 20_000, Manual: true}
+	intent := aegis.OrderIntent{Symbol: "EURUSD", AssetClass: "forex", Direction: "BUY", OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.12, Size: 20_000, Manual: true, Limits: aegis.Limits{MaxUnits: 5_000}}
 
 	if _, placed, err := e.ExecuteWithResult(ctx, intent, "d1"); placed || err == nil || !strings.Contains(err.Error(), "5000 units") {
-		t.Fatalf("a person's own account must hit the same size ceiling: placed=%v err=%v", placed, err)
+		t.Fatalf("a person's own account must hold to the limit the sender passed: placed=%v err=%v", placed, err)
 	}
 	intent.Size = 1_000
 	guard.Pause("")

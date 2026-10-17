@@ -114,6 +114,8 @@ type signalRequest struct {
 	// MinRR is the smallest reward-to-risk the sender will accept for this trade.
 	// aegis has no ratio of its own; absent or 0 means no limit.
 	MinRR float64 `json:"min_rr,omitempty"`
+	// Limits are the person's own ceilings; aegis sets none of its own (see aegis.Limits).
+	Limits aegis.Limits `json:"limits,omitempty"`
 	// Size is how much to trade, chosen by the caller (aegis never sizes a trade):
 	// whole units for forex and stocks, a base-asset quantity for crypto. Required.
 	Size float64 `json:"size"`
@@ -268,6 +270,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Manual:     req.Manual,
 		Size:       req.Size,
 		MinRR:      req.MinRR,
+		Limits:     req.Limits,
 	}
 
 	// ── Submit to the gateway (single business path) ──────────────────────────

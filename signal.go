@@ -53,6 +53,10 @@ type TradeSignal struct {
 	// enforces only what the user asked for. 0 or absent means no limit. A value
 	// that is negative or not a number is rejected. It applies to Manual trades too.
 	MinRR float64 `json:"min_rr,omitempty"`
+	// Limits are the person's own ceilings for this account (largest trade, open
+	// positions, trades per day, daily loss). aegis has none of its own: it holds the
+	// line on whatever the sender passes, and refuses a trade that would go past them.
+	Limits Limits `json:"limits,omitempty"`
 	// Size is how much to trade, decided by the caller; aegis never works it out.
 	// Forex and stocks: a whole number of units. Crypto: a quantity of the base
 	// asset (for example 0.05 BTC). Required, > 0. It is used exactly as given or
@@ -123,6 +127,8 @@ type OrderIntent struct {
 	// Size is the caller's position size, passed through untouched: whole units for
 	// forex and stocks, a base-asset quantity for crypto.
 	Size float64
+	// Limits are the sender's own ceilings for this trade's account (see TradeSignal.Limits).
+	Limits Limits
 	// ReasonText is a single audit string surfaced in the trade journal.
 	ReasonText string
 }
@@ -315,6 +321,7 @@ func (g *signalGateway) Submit(ctx context.Context, sig TradeSignal) (SignalResu
 		Confidence: 60, // default for gateway-submitted signals
 		Manual:     sig.Manual,
 		Size:       sig.Size,
+		Limits:     sig.Limits,
 		ReasonText: sig.Note,
 	}
 
@@ -421,6 +428,9 @@ func (g *signalGateway) validateSignal(sig TradeSignal) (SignalResult, bool) {
 	// sender asked for on this trade (sig.MinRR), and that applies to manual trades too.
 	if math.IsNaN(sig.MinRR) || math.IsInf(sig.MinRR, 0) || sig.MinRR < 0 {
 		return reject("min_rr must be a number, 0 or more")
+	}
+	if err := sig.Limits.Validate(); err != nil {
+		return reject(err.Error())
 	}
 	if sig.MinRR > 0 {
 		slDist := math.Abs(sig.Entry - sig.StopLoss)
