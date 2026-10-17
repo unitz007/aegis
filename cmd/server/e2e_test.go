@@ -35,7 +35,7 @@ func TestEndToEnd_TradeLandsOnTheRequestedAccount(t *testing.T) {
 		return def.ExecuteWithResult(ctx, in, id)
 	}
 	gw, err := aegis.NewGateway(place, aegis.GatewayConfig{
-		AllowedSources: []string{"finos"},
+		AllowedSources:   []string{"finos"},
 		SymbolClassifier: aegis.ClassifySymbolDefault, ExecutabilityCheck: aegis.DefaultExecutability,
 	})
 	if err != nil {

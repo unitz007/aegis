@@ -168,6 +168,7 @@ func main() {
 	if accts != nil {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.check))
 		mux.Handle("/account/key", keyHandler(sealPublic))
+		mux.Handle("/brokers", brokersHandler(registry, allowAccountLive))
 	} else {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}

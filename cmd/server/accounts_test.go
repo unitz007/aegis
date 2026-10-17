@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -20,7 +22,7 @@ func testRegistry(built *int, record map[string]*paper.Broker) *broker.Registry 
 	r := broker.NewRegistry()
 	err := r.Register(broker.Spec{
 		Name: "capital", Envs: []string{"demo", "live"},
-		Fields: []string{"api_key", "email", "password"}, Identity: []string{"api_key", "email"},
+		Fields: []broker.Field{{Name: "api_key"}, {Name: "email"}, {Name: "password"}}, Identity: []string{"api_key", "email"},
 		New: func(env string, c broker.Credentials) (broker.Port, error) {
 			*built++
 			b := paper.New(5_000, nil)
@@ -283,5 +285,43 @@ func TestLoadSealKey(t *testing.T) {
 		if _, _, err := loadSealKey(bad); err == nil {
 			t.Errorf("%q should be refused", bad)
 		}
+	}
+}
+
+func TestBrokersHandler_PublishesTheOptionsAndNeverAnAccount(t *testing.T) {
+	built := new(int)
+	reg := testRegistry(built, nil)
+	get := func(allowLive bool) map[string]any {
+		rec := httptest.NewRecorder()
+		brokersHandler(reg, allowLive).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/brokers", nil))
+		if rec.Code != 200 {
+			t.Fatalf("%d", rec.Code)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	envsOf := func(out map[string]any) []any {
+		return out["brokers"].([]any)[0].(map[string]any)["envs"].([]any)
+	}
+	if e := envsOf(get(false)); len(e) != 1 || e[0] != "demo" {
+		t.Errorf("live must not be offered while it is off: %v", e)
+	}
+	if e := envsOf(get(true)); len(e) != 2 {
+		t.Errorf("live should be offered when allowed: %v", e)
+	}
+	b := get(false)["brokers"].([]any)[0].(map[string]any)
+	if b["name"] != "capital" || len(b["fields"].([]any)) != 3 {
+		t.Errorf("name and the three login fields should be listed: %v", b)
+	}
+	post := httptest.NewRecorder()
+	brokersHandler(reg, false).ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/brokers", nil))
+	if post.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET only: %d", post.Code)
+	}
+	if *built != 0 {
+		t.Error("listing brokers must never connect to one")
 	}
 }

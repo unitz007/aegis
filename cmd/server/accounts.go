@@ -150,15 +150,15 @@ func parseCredentials(spec broker.Spec, plain []byte) (broker.Credentials, error
 		return nil, fmt.Errorf("credentials must be a JSON object of the broker's login fields")
 	}
 	allowed := map[string]bool{}
-	for _, f := range spec.Fields {
+	for _, f := range spec.FieldNames() {
 		allowed[f] = true
 		if strings.TrimSpace(creds[f]) == "" {
-			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.Fields, ", "))
+			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.FieldNames(), ", "))
 		}
 	}
 	for f := range creds {
 		if !allowed[f] {
-			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.Fields, ", "))
+			return nil, fmt.Errorf("credentials need: %s", strings.Join(spec.FieldNames(), ", "))
 		}
 		creds[f] = strings.TrimSpace(creds[f])
 	}
