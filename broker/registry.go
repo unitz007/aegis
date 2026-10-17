@@ -13,10 +13,10 @@ type Credentials map[string]string
 
 // Field is one detail a broker login needs, described so a screen can ask for it.
 type Field struct {
-	Name   string // what it is called on the wire, e.g. "api_key"
-	Label  string // what a person sees, e.g. "API key"
-	Secret bool   // hide it while typing (passwords, keys)
-	Help   string // optional one-line hint
+	Name   string `json:"name"`           // what it is called on the wire, e.g. "api_key"
+	Label  string `json:"label"`          // what a person sees, e.g. "API key"
+	Secret bool   `json:"secret"`         // hide it while typing (passwords, keys)
+	Help   string `json:"help,omitempty"` // optional one-line hint
 }
 
 // Info is what is safe to tell anyone about a registered broker: enough to build

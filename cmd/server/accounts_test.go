@@ -325,3 +325,36 @@ func TestBrokersHandler_PublishesTheOptionsAndNeverAnAccount(t *testing.T) {
 		t.Error("listing brokers must never connect to one")
 	}
 }
+
+// The published list is a wire format other programs read: its keys are fixed,
+// lower case, and say nothing beyond what a connect screen needs.
+func TestBrokersHandler_WireFormatIsStable(t *testing.T) {
+	reg := testRegistry(new(int), nil)
+	rec := httptest.NewRecorder()
+	brokersHandler(reg, false).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/brokers", nil))
+	var raw struct {
+		Brokers []map[string]json.RawMessage `json:"brokers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw.Brokers) != 1 {
+		t.Fatalf("%v %s", err, rec.Body.String())
+	}
+	for _, k := range []string{"name", "label", "envs", "fields"} {
+		if _, ok := raw.Brokers[0][k]; !ok {
+			t.Errorf("broker is missing %q: %s", k, rec.Body.String())
+		}
+	}
+	var fields []map[string]any
+	_ = json.Unmarshal(raw.Brokers[0]["fields"], &fields)
+	for _, f := range fields {
+		for _, k := range []string{"name", "label", "secret"} {
+			if _, ok := f[k]; !ok {
+				t.Errorf("field is missing lower-case %q: %v", k, f)
+			}
+		}
+		for k := range f {
+			if k != strings.ToLower(k) {
+				t.Errorf("field key %q must be lower case", k)
+			}
+		}
+	}
+}
