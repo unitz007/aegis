@@ -360,8 +360,8 @@ func TestBrokersHandler_WireFormatIsStable(t *testing.T) {
 }
 
 // A person's own account gets its own executor, but the pause switch is the server's: it
-// must stop every account at once. Their own limits arrive with their trade requests.
-func TestResolve_EveryAccountSharesThePauseSwitchAndHonoursItsOwnersLimits(t *testing.T) {
+// must stop every account at once.
+func TestResolve_EveryAccountSharesThePauseSwitch(t *testing.T) {
 	priv, pub, err := sealed.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -376,12 +376,8 @@ func TestResolve_EveryAccountSharesThePauseSwitchAndHonoursItsOwnersLimits(t *te
 		t.Fatal(err)
 	}
 	e, _ := executorFrom(ctx)
-	intent := aegis.OrderIntent{Symbol: "EURUSD", AssetClass: "forex", Direction: "BUY", OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.12, Size: 20_000, Manual: true, Limits: aegis.Limits{MaxUnits: 5_000}}
+	intent := aegis.OrderIntent{Symbol: "EURUSD", AssetClass: "forex", Direction: "BUY", OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.12, Size: 1_000, Manual: true}
 
-	if _, placed, err := e.ExecuteWithResult(ctx, intent, "d1"); placed || err == nil || !strings.Contains(err.Error(), "5000 units") {
-		t.Fatalf("a person's own account must hold to the limit the sender passed: placed=%v err=%v", placed, err)
-	}
-	intent.Size = 1_000
 	guard.Pause("")
 	if _, placed, err := e.ExecuteWithResult(ctx, intent, "d2"); placed || err == nil || !strings.Contains(err.Error(), "paused") {
 		t.Fatalf("pausing the server must stop a person's account too: placed=%v err=%v", placed, err)

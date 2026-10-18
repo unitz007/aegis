@@ -635,28 +635,3 @@ func TestWebhook_MinRRIsPassedThroughAsSent(t *testing.T) {
 		}
 	}
 }
-
-// The person's own limits reach the gateway exactly as sent, and when none are sent none
-// are invented: aegis has no limits of its own.
-func TestWebhook_LimitsArePassedThroughAsSentAndNeverInvented(t *testing.T) {
-	gw := newGW(aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
-	h := Handler(testSecret, gw)
-	body := validBody()
-	body["limits"] = map[string]any{"max_units": 50000, "max_crypto_value": 2500.5, "max_open_positions": 3, "max_trades_per_day": 4, "max_daily_loss": 300}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, makeRequest(t, testSecret, body))
-	if gw.count() != 1 {
-		t.Fatalf("want 1 gateway call: %d %s", rec.Code, rec.Body)
-	}
-	want := aegis.Limits{MaxUnits: 50000, MaxCryptoValue: 2500.5, MaxOpenPositions: 3, MaxTradesPerDay: 4, MaxDailyLoss: 300}
-	if got := gw.last().Limits; got != want {
-		t.Errorf("limits reached the gateway as %+v, want %+v", got, want)
-	}
-
-	gw2 := newGW(aegis.SignalResult{Accepted: true, Placed: true, Code: aegis.ReasonPlaced}, nil)
-	rec = httptest.NewRecorder()
-	Handler(testSecret, gw2).ServeHTTP(rec, makeRequest(t, testSecret, validBody()))
-	if got := gw2.last().Limits; got != (aegis.Limits{}) {
-		t.Errorf("no limits sent must mean none: %+v", got)
-	}
-}

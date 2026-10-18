@@ -226,23 +226,11 @@ The defaults for `SymbolClassifier` and `ExecutabilityCheck` were chosen to matc
 
 - **Validation runs before slot reservation.** Allowlist, content, RR-floor, and executability checks all run before `getOrReserve` — a rejected signal never burns an idempotency slot.
 
-### The person's own limits, and the pause switch
+### No limits of its own, and the pause switch
 
-Aegis has **no limits of its own**, just as it has no reward-to-risk floor and never sizes a trade. The person trading chooses their limits, and the sender passes them with each trade request, like `min_rr`. Aegis holds the line on whatever it is given and refuses a trade that would go past it. Absent or `0` means that limit is not set.
+Aegis is an execution layer. It places the trades it is told to place and makes no trading decisions: it has no reward-to-risk floor of its own, never sizes a trade, and holds no ceilings on trade size, open positions, trades per day or daily loss. Those are decisions about whether to trade, so they belong to whoever decides to trade (the agent, on the person's behalf), which enforces them before it ever calls aegis.
 
-Send them in the request as `limits` (webhook) or as the matching optional tool inputs (MCP):
-
-| Field | What it stops |
-|---|---|
-| `max_units` | a single forex/stock trade larger than this many units |
-| `max_crypto_value` | a single crypto trade whose quantity × entry price is larger than this |
-| `max_open_positions` | a new trade when the account already has this many open trades + waiting orders |
-| `max_trades_per_day` | more new trades than this on the account per UTC day |
-| `max_daily_loss` | new trades for the rest of the UTC day once the account is down this much (in its own currency) from the value aegis first saw that day |
-
-A trade over a limit is **refused, never shrunk**, and the sender is told why in plain words (for example "That trade is bigger than the largest allowed (100000 units), so nothing was placed."). A negative or non-numeric limit is rejected as invalid. A limit that cannot be checked (the account can't be read) refuses too. Day counts and day-start values are kept per account, shared across every executor, in memory: a restart begins a fresh day. Library users may also set `Executor.Limits`; when both are set the stricter value of each applies.
-
-**Pause switch.** The one safety control aegis owns, because it has no values to choose. `Guard.Pause(reason)` stops every new trade, on every account, before the broker is even asked; closing existing trades is unaffected. Start paused with `TRADING_PAUSED=true`. With `ADMIN_TOKEN` set, the server also serves (bearer token required):
+**Pause switch.** The one control aegis owns: an operator's stop, with no values to choose. `Guard.Pause(reason)` stops every new trade, on every account, before the broker is even asked; closing existing trades is unaffected. Start paused with `TRADING_PAUSED=true`. With `ADMIN_TOKEN` set, the server also serves (bearer token required):
 
 - `GET /admin/status` — whether trading is paused
 - `POST /admin/pause` — body `{"reason": "optional short note"}`

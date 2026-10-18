@@ -95,10 +95,8 @@ type Executor struct {
 	MinConfidence    int     // minimum confidence for non-algo-pair decisions; default 55
 	MaxCurrencyUnits float64 // per-currency exposure cap; 0 = disabled
 
-	// Limits are hard ceilings that hold whatever the sender asks (see Limits). Guard is
-	// the state they and the pause switch share: give every Executor the same one.
-	Limits Limits
-	Guard  *Guard
+	// Guard is the pause switch: give every Executor the same one, so it stops them all.
+	Guard *Guard
 
 	// Hooks — all optional; safe defaults are used when nil.
 	IsAlgoPair  IsAlgoPairFunc
@@ -278,13 +276,6 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 		return "", false, nil
 	}
 
-	// ── Hard limits: size, open positions, trades and loss for the day ─────────
-	account, lerr := e.checkLimits(ctx, intent, openTrades, openOrders)
-	if lerr != nil {
-		log.Printf("executor: %s limit: %v — skip", sym, lerr)
-		return "", false, lerr
-	}
-
 	switch assetClass {
 	case "crypto":
 		// Safety invariant #2: Capital.com crypto CFD "size" is in base-asset
@@ -350,9 +341,6 @@ func (e *Executor) innerExecute(ctx context.Context, intent OrderIntent, decisio
 	}
 	log.Printf("executor: placed %s %s %s order=%s units=%d qty=%.6f",
 		dir, sym, intent.OrderType, receipt.BrokerTradeID, receipt.Units, req.Quantity)
-	if account != "" {
-		e.guard().recordPlaced(account)
-	}
 
 	// ── Persist receipt (optional) ────────────────────────────────────────────
 	if e.Store != nil {

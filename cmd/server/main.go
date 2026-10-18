@@ -107,9 +107,9 @@ func main() {
 	}
 
 	// ── Pause switch ──────────────────────────────────────────────────────────────
-	// The one safety control aegis owns, because it has no values to choose: it stops
-	// every new trade on every account until resumed. Limits are not here: they are each
-	// person's own and arrive with their trade requests.
+	// The one control aegis owns: it stops every new trade on every account until resumed.
+	// Aegis makes no trading decisions, so there are no limits here: the agent that decides
+	// to trade holds those.
 	guard := aegis.NewGuard(nil)
 	if startPaused() {
 		guard.Pause("starting paused")
