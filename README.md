@@ -196,6 +196,7 @@ One aegis server can trade for many people, each on their own broker account. A 
 - Logins are opened in memory only (one connection per account, so the broker session is reused). They are never stored, logged or returned in errors.
 - Duplicate protection is namespaced per account, so two accounts can reuse a `signal_id`.
 - `POST /account/check` (same signature scheme, body `{"timestamp": …, "account": {…}}`) logs in and returns `{"ok": true, "account": {"currency", "balance", "env"}}` without placing anything. Use it to verify a login before trading.
+- `POST /account/status` (same signature scheme and body) reads what is open on the account right now and returns `{"ok": true, "account": {"env", "currency", "balance", "equity", "unrealized_pnl", "margin_used", "margin_available", "open_trades": [{"symbol", "direction", "units", "open_price", "current_price", "unrealized_pnl", "stop_loss", "take_profit", "opened_at"}], "pending_orders": [{"symbol", "direction", "units", "order_type", "level", "stop_loss", "take_profit", "created_at"}]}}`. It only reports what the broker says: it never places, changes or cancels anything, and it decides nothing.
 
 ## The injected-hooks model
 

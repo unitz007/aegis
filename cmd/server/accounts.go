@@ -202,6 +202,74 @@ func (a *accounts) evictOldestLocked() {
 	delete(a.cache, oldestKey)
 }
 
+// status implements webhook.AccountCheckFunc for /account/status: what is open on the account right
+// now, read from the broker. It never places, changes or cancels anything, and it decides nothing:
+// it only reports what the broker says.
+func (a *accounts) status(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	acct, err := e.Broker.Account(ctx)
+	if err != nil {
+		return nil, err
+	}
+	trades, err := e.Broker.OpenTrades(ctx)
+	if err != nil {
+		return nil, err
+	}
+	orders, err := e.Broker.OpenOrders(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	openTrades := make([]map[string]any, 0, len(trades))
+	for _, t := range trades {
+		openTrades = append(openTrades, map[string]any{
+			"symbol": t.Symbol, "direction": directionOf(t.Units), "units": absInt(t.Units),
+			"open_price": t.OpenPrice, "current_price": t.CurrentPrice, "unrealized_pnl": t.UnrealizedPnL,
+			"stop_loss": t.StopLoss, "take_profit": t.TakeProfit, "opened_at": t.OpenedAt,
+		})
+	}
+	pending := make([]map[string]any, 0, len(orders))
+	for _, o := range orders {
+		dir := strings.ToUpper(o.Direction)
+		if dir != "BUY" && dir != "SELL" {
+			dir = directionOf(o.Units)
+		}
+		pending = append(pending, map[string]any{
+			"symbol": o.Symbol, "direction": dir, "units": absInt(o.Units), "order_type": strings.ToLower(o.OrderType),
+			"level": o.Level, "stop_loss": o.StopLoss, "take_profit": o.TakeProfit, "created_at": o.CreatedAt,
+		})
+	}
+	return map[string]any{
+		"env":              e.BrokerName[strings.Index(e.BrokerName, ":")+1:],
+		"currency":         acct.Currency,
+		"balance":          acct.Balance,
+		"equity":           acct.NAV,
+		"unrealized_pnl":   acct.UnrealizedPnL,
+		"margin_used":      acct.MarginUsed,
+		"margin_available": acct.MarginAvailable,
+		"open_trades":      openTrades,
+		"pending_orders":   pending,
+	}, nil
+}
+
+// directionOf says whether a signed size is a long (BUY) or a short (SELL) position.
+func directionOf(units int) string {
+	if units < 0 {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // check implements webhook.AccountCheckFunc: it proves the credentials work by
 // reading the account, and never places an order.
 func (a *accounts) check(ctx context.Context) (any, error) {

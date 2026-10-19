@@ -383,3 +383,69 @@ func TestResolve_EveryAccountSharesThePauseSwitch(t *testing.T) {
 		t.Fatalf("pausing the server must stop a person's account too: placed=%v err=%v", placed, err)
 	}
 }
+
+// Status reports what is open on the account, as the broker says it: the balance, each open
+// position with how it is doing, and the orders still waiting. It is a read: nothing is placed,
+// changed or cancelled, and one account never sees another's.
+func TestStatus_ReportsOpenTradesAndOrdersWithoutChangingAnything(t *testing.T) {
+	r := newRig(t, false)
+	ctx, _, err := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := r.brokers["a@b.co"]
+	if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: "EURUSD", Units: 10000, OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.13}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: "USDCHF", Units: -5000, OrderType: "limit", EntryPrice: 0.93584, StopLoss: 0.94, TakeProfit: 0.92}); err != nil {
+		t.Fatal(err)
+	}
+	trades, orders := pb.TradeCount(), pb.OrderCount()
+
+	info, err := r.a.status(ctx)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	m := info.(map[string]any)
+	if m["env"] != "demo" || m["currency"] == nil || m["balance"] == nil || m["equity"] == nil {
+		t.Errorf("the account: %v", m)
+	}
+	open := m["open_trades"].([]map[string]any)
+	if len(open) != 1 || open[0]["symbol"] != "EURUSD" || open[0]["direction"] != "BUY" || open[0]["units"] != 10000 || open[0]["stop_loss"] != 1.09 || open[0]["take_profit"] != 1.13 {
+		t.Errorf("the open position, with its levels: %v", open)
+	}
+	if _, ok := open[0]["unrealized_pnl"]; !ok {
+		t.Errorf("how it is doing: %v", open[0])
+	}
+	pending := m["pending_orders"].([]map[string]any)
+	if len(pending) != 1 || pending[0]["symbol"] != "USDCHF" || pending[0]["direction"] != "SELL" || pending[0]["units"] != 5000 || pending[0]["level"] != 0.93584 || pending[0]["order_type"] != "limit" {
+		t.Errorf("the waiting order: %v", pending)
+	}
+	if pb.TradeCount() != trades || pb.OrderCount() != orders {
+		t.Errorf("a read must change nothing: trades %d→%d, orders %d→%d", trades, pb.TradeCount(), orders, pb.OrderCount())
+	}
+
+	// Another account sees none of it.
+	other := map[string]string{"api_key": "k2", "email": "other@b.co", "password": "x"}
+	ctx2, _, _ := r.a.resolve(context.Background(), r.account(t, "capital", "demo", other))
+	info2, err := r.a.status(ctx2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m2 := info2.(map[string]any); len(m2["open_trades"].([]map[string]any)) != 0 || len(m2["pending_orders"].([]map[string]any)) != 0 {
+		t.Errorf("another account must not see this account's positions: %v", m2)
+	}
+	if _, err := r.a.status(context.Background()); err == nil {
+		t.Errorf("status without an account in context must fail")
+	}
+}
+
+func TestStatus_NoAccountMeansEmptyListsNotNull(t *testing.T) {
+	r := newRig(t, false)
+	ctx, _, _ := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
+	info, _ := r.a.status(ctx)
+	raw, _ := json.Marshal(info)
+	if !strings.Contains(string(raw), `"open_trades":[]`) || !strings.Contains(string(raw), `"pending_orders":[]`) {
+		t.Errorf("empty lists, never null (a client counts them): %s", raw)
+	}
+}

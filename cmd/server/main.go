@@ -182,12 +182,15 @@ func main() {
 
 	// /account/check — signed; proves an account's credentials work (never trades)
 	// /account/key   — public; the key senders seal broker logins to
+	// /account/status — signed; what is open on an account right now (reads only, never trades)
 	if accts != nil {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.check))
+		mux.Handle("/account/status", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.status))
 		mux.Handle("/account/key", keyHandler(sealPublic))
 		mux.Handle("/brokers", brokersHandler(registry, allowAccountLive))
 	} else {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/account/status", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}
 
 	// /admin/ — owner's pause switch and status. Off unless ADMIN_TOKEN is set.
