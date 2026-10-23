@@ -125,8 +125,8 @@ type signalRequest struct {
 
 // handler is the concrete webhook http.Handler.
 type handler struct {
-	secret  string         // HMAC-SHA256 key; empty → 503
-	gateway aegis.Gateway  // single business path; nil → 503
+	secret  string        // HMAC-SHA256 key; empty → 503
+	gateway aegis.Gateway // single business path; nil → 503
 	cfg     config
 }
 
@@ -373,6 +373,20 @@ func hasAccount(raw json.RawMessage) bool {
 // confirming the credentials work) and returns a JSON-serialisable summary.
 type AccountCheckFunc func(ctx context.Context) (any, error)
 
+type accountRequestKey struct{}
+
+// AccountRequestBody is the signed request an AccountCheckFunc is answering, for reads that take more than the
+// account (such as which symbols to read). It is already verified when the func runs.
+// WithAccountRequestBody is how the handler passes the verified request on (and how tests stand in for it).
+func WithAccountRequestBody(ctx context.Context, body []byte) context.Context {
+	return context.WithValue(ctx, accountRequestKey{}, body)
+}
+
+func AccountRequestBody(ctx context.Context) []byte {
+	b, _ := ctx.Value(accountRequestKey{}).([]byte)
+	return b
+}
+
 // AccountCheckHandler returns the signed POST handler used to verify an account
 // before trading on it. Body: {"timestamp": <unix>, "account": {...}}, signed
 // exactly like the trade webhook. It never places an order.
@@ -426,6 +440,7 @@ func AccountCheckHandler(secret string, resolve AccountResolver, check AccountCh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "reason": fmt.Sprintf("invalid account: %v", err)})
 			return
 		}
+		ctx = WithAccountRequestBody(ctx, raw)
 		info, err := check(ctx)
 		if err != nil {
 			cfg.logger.Printf("webhook: account check failed: %v", err)

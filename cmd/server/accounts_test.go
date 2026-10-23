@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/unitz007/aegis/transport/webhook"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -447,5 +448,38 @@ func TestStatus_NoAccountMeansEmptyListsNotNull(t *testing.T) {
 	raw, _ := json.Marshal(info)
 	if !strings.Contains(string(raw), `"open_trades":[]`) || !strings.Contains(string(raw), `"pending_orders":[]`) {
 		t.Errorf("empty lists, never null (a client counts them): %s", raw)
+	}
+}
+
+// /market/info reads a few symbols' prices and deal-size rules, without changing anything; a symbol with no price says
+// so on its own.
+func TestMarket_PricesAndDealSizeRules(t *testing.T) {
+	r := newRig(t, false)
+	acct := r.account(t, "capital", "demo", good())
+	ctx, _, err := r.a.resolve(context.Background(), acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := r.brokers["a@b.co"]
+	pb.DealingRules = map[string]broker.DealingRules{"EURUSD": {MinDealSize: 1000, MaxDealSize: 5_000_000}}
+	body, _ := json.Marshal(map[string]any{"symbols": []string{"eurusd", "GBPJPY", "A", "B", "C", "D"}})
+	ctx = webhook.WithAccountRequestBody(ctx, body)
+	info, err := r.a.market(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markets := info.(map[string]any)["markets"].(map[string]any)
+	eur := markets["EURUSD"].(map[string]any)
+	if eur["min_size"] != 1000.0 || eur["max_size"] != 5_000_000.0 {
+		t.Errorf("the broker's deal-size rules: %v", eur)
+	}
+	if _, ok := eur["bid"]; !ok {
+		t.Errorf("a price (0 from the paper broker): %v", eur)
+	}
+	if len(markets) != maxMarketSymbols {
+		t.Errorf("at most %d symbols are read: %d", maxMarketSymbols, len(markets))
+	}
+	if pb.TradeCount() != 0 || pb.OrderCount() != 0 {
+		t.Error("a read changes nothing")
 	}
 }

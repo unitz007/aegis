@@ -16,6 +16,7 @@ import (
 	"github.com/unitz007/aegis"
 	"github.com/unitz007/aegis/broker"
 	"github.com/unitz007/aegis/sealed"
+	"github.com/unitz007/aegis/transport/webhook"
 )
 
 // accountSpec is the broker account a signed request wants to trade on.
@@ -253,6 +254,48 @@ func (a *accounts) status(ctx context.Context) (any, error) {
 		"open_trades":      openTrades,
 		"pending_orders":   pending,
 	}, nil
+}
+
+// maxMarketSymbols is how many symbols one /market/info read may ask about.
+const maxMarketSymbols = 5
+
+// market implements webhook.AccountCheckFunc for /market/info: for each symbol asked about, the broker's live bid and
+// ask and its smallest and largest deal size, so a sender can work out a size within what the broker accepts. It reads
+// only and decides nothing. A symbol the broker can't answer for says so on its own, without failing the others; a
+// price of 0 means the broker gives none (the paper broker), and min/max of 0 mean it has no rules for the symbol.
+func (a *accounts) market(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		Symbols []string `json:"symbols"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	if len(req.Symbols) > maxMarketSymbols {
+		req.Symbols = req.Symbols[:maxMarketSymbols]
+	}
+	rules, hasRules := e.Broker.(broker.DealingRulesProvider)
+	markets := map[string]any{}
+	for _, raw := range req.Symbols {
+		sym := strings.ToUpper(strings.TrimSpace(raw))
+		if sym == "" {
+			continue
+		}
+		m := map[string]any{}
+		if bid, ask, err := e.Broker.LiveQuote(ctx, sym); err != nil {
+			m["error"] = "no price for this symbol"
+		} else {
+			m["bid"], m["ask"] = bid, ask
+		}
+		if hasRules {
+			if r, err := rules.MarketDealingRules(ctx, sym); err == nil {
+				m["min_size"], m["max_size"] = r.MinDealSize, r.MaxDealSize
+			}
+		}
+		markets[sym] = m
+	}
+	return map[string]any{"markets": markets}, nil
 }
 
 // directionOf says whether a signed size is a long (BUY) or a short (SELL) position.
