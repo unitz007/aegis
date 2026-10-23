@@ -188,6 +188,9 @@ func (a *Adapter) createSession(ctx context.Context) error {
 // req.OrderType == "limit" routes to the working-orders endpoint;
 // everything else places an immediate market order.
 func (a *Adapter) PlaceTrade(ctx context.Context, req broker.TradeRequest) (broker.TradeReceipt, error) {
+	if err := checkForexSize(req); err != nil {
+		return broker.TradeReceipt{}, err
+	}
 	if strings.EqualFold(req.OrderType, "limit") {
 		return a.placeLimitOrder(ctx, req)
 	}
@@ -932,15 +935,37 @@ var knownFiatCurrencies = map[string]struct{}{
 // Sending size=0.01 produces error.invalid.size.minvalue because the API
 // expects integer-scale units like 1000 (1000 units of base currency).
 //
-// Minimum enforced at 1000 units — a micro-position (~10 USD margin at 1% req).
+// The size is used exactly as given: a size below Capital.com's minimum is refused before anything is sent (see
+// checkForexSize), never raised to it, since raising it would risk more than the sender chose.
 func unitsToCapitalSize(units int) float64 {
 	if units < 0 {
 		units = -units
 	}
-	if units < 1000 {
-		units = 1000 // Capital.com minimum deal size for forex CFDs
-	}
 	return float64(units)
+}
+
+// capitalMinForexUnits is Capital.com's smallest deal size for forex CFDs, in units.
+const capitalMinForexUnits = 1000
+
+// checkForexSize refuses a forex order (sized in units) that is empty or below Capital.com's smallest deal size. It
+// used to be raised to 1,000 units quietly (until 2026-10-23), which placed a bigger trade than was asked for. Crypto
+// quantities are not checked here: the executor clamps those against the instrument's own dealing rules.
+func checkForexSize(req broker.TradeRequest) error {
+	if req.Quantity != 0 {
+		return nil
+	}
+	units := req.Units
+	if units < 0 {
+		units = -units
+	}
+	if units == 0 {
+		return fmt.Errorf("capital: no size was given for %s, so nothing was placed", req.Symbol)
+	}
+	if units < capitalMinForexUnits {
+		return fmt.Errorf("capital: %d units of %s is below the broker's smallest trade of %d units, so nothing was placed (a size is never raised)",
+			units, req.Symbol, capitalMinForexUnits)
+	}
+	return nil
 }
 
 // capitalDealSize selects the order's "size" field. When req.Quantity is set

@@ -384,8 +384,9 @@ func TestCapitalAdapter_PlaceLimitOrder_REJECTED(t *testing.T) {
 // ── capitalDealSize / unitsToCapitalSize edge cases ───────────────────────────
 
 // TestCapitalDealSize verifies the deal-size selection: crypto Quantity is used
-// verbatim (fractional, NO 1000-unit forex floor) while the integer Units path
-// still applies the forex minimum. Regression for the crypto over-max bug.
+// verbatim (fractional) and the integer Units path is used as given, never raised
+// (a size below the minimum is refused before sending: see TestPlaceTrade_BelowTheMinimumIsRefusedNeverRaised).
+// Regression for the crypto over-max bug.
 func TestCapitalDealSize(t *testing.T) {
 	cases := []struct {
 		name string
@@ -395,7 +396,7 @@ func TestCapitalDealSize(t *testing.T) {
 		{"crypto fractional preserved", broker.TradeRequest{Symbol: "BTCUSD", Quantity: 0.00126}, 0.00126},
 		{"crypto short uses abs", broker.TradeRequest{Symbol: "BTCUSD", Units: -1, Quantity: -0.05}, 0.05},
 		{"crypto small not floored to 1000", broker.TradeRequest{Symbol: "ETHUSD", Quantity: 0.001}, 0.001},
-		{"forex below floor → 1000", broker.TradeRequest{Symbol: "EUR/USD", Units: 200}, 1000},
+		{"forex below the minimum is not raised", broker.TradeRequest{Symbol: "EUR/USD", Units: 200}, 200},
 		{"forex above floor unchanged", broker.TradeRequest{Symbol: "EUR/USD", Units: 20000}, 20000},
 		{"zero quantity falls through to units", broker.TradeRequest{Symbol: "EUR/USD", Units: 5000, Quantity: 0}, 5000},
 	}
@@ -408,15 +409,15 @@ func TestCapitalDealSize(t *testing.T) {
 	}
 }
 
-// TestUnitsToCapitalSize verifies the forex minimum floor and absolute value.
+// TestUnitsToCapitalSize verifies a size is used exactly as given (only its sign dropped): never raised to a minimum.
 func TestUnitsToCapitalSize(t *testing.T) {
 	cases := []struct {
 		units int
 		want  float64
 	}{
-		{0, 1000},
-		{500, 1000},
-		{999, 1000},
+		{0, 0},
+		{500, 500},
+		{999, 999},
 		{1000, 1000},
 		{2500, 2500},
 		{-3000, 3000}, // negative units → abs
@@ -505,4 +506,38 @@ func TestCompileTimeAssertions(t *testing.T) {
 	// These will fail to compile if Adapter does not implement the interfaces.
 	var _ broker.Port = (*Adapter)(nil)
 	var _ broker.DealingRulesProvider = (*Adapter)(nil)
+}
+
+// A forex order below Capital.com's smallest trade is refused before anything is sent, with the reason, for market and
+// limit orders alike: it is never raised to the minimum (that placed a bigger trade than was asked for). At the minimum
+// and above, the size goes as given; crypto quantities are not held to the forex minimum.
+func TestPlaceTrade_BelowTheMinimumIsRefusedNeverRaised(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	a := newTestAdapter(srv.URL)
+	for _, req := range []broker.TradeRequest{
+		{Symbol: "EUR/USD", Units: 200, OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.12},
+		{Symbol: "EUR/USD", Units: -999, OrderType: "limit", EntryPrice: 1.1, StopLoss: 1.11, TakeProfit: 1.08},
+	} {
+		_, err := a.PlaceTrade(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "below the broker's smallest trade of 1000 units") || !strings.Contains(err.Error(), "nothing was placed") {
+			t.Errorf("%d units: refused with the reason, got %v", req.Units, err)
+		}
+	}
+	if _, err := a.PlaceTrade(context.Background(), broker.TradeRequest{Symbol: "EUR/USD", OrderType: "market"}); err == nil || !strings.Contains(err.Error(), "no size") {
+		t.Errorf("no size: refused, got %v", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("nothing may reach the broker for a refused size: %d request(s)", n)
+	}
+	if err := checkForexSize(broker.TradeRequest{Symbol: "EUR/USD", Units: 1000}); err != nil {
+		t.Errorf("the minimum itself is allowed: %v", err)
+	}
+	if err := checkForexSize(broker.TradeRequest{Symbol: "BTCUSD", Quantity: 0.001}); err != nil {
+		t.Errorf("crypto is not held to the forex minimum: %v", err)
+	}
 }
