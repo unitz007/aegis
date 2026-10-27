@@ -555,6 +555,8 @@ func TestCapitalAdapter_ConfirmReadsDealStatus(t *testing.T) {
 		{"a working order refused", `{"date":"2026-10-27T13:17:44","status":"DELETED","dealStatus":"REJECTED","reason":"RISK_CHECK","dealReference":"o_1","dealId":"00000000-6e90-4101-0472-7c8d0015549e"}`, true, "RISK_CHECK", ""},
 		{"a market order refused", `{"status":"CLOSED","dealStatus":"REJECTED","reason":"MARKET_CLOSED","dealId":"D2"}`, false, "MARKET_CLOSED", ""},
 		{"refused with no reason", `{"dealStatus":"REJECTED"}`, true, "no reason given", ""},
+		{"the reason elsewhere", `{"dealStatus":"REJECTED","reason":"SUCCESS","rejectReason":"ORDER_LEVEL_INVALID"}`, true, "ORDER_LEVEL_INVALID", ""},
+		{"only how the deal ended", `{"dealStatus":"REJECTED","affectedDeals":[{"dealId":"D9","status":"DELETED"}]}`, true, "deal deleted", ""},
 		{"a working order accepted", `{"status":"OPEN","dealStatus":"ACCEPTED","dealId":"D3","level":1.0850}`, true, "", "limit:D3"},
 		{"a market order accepted", `{"status":"OPEN","dealStatus":"ACCEPTED","dealId":"D4","level":1.0851}`, false, "", "D4"},
 	} {

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -253,8 +254,8 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 	}
 
 	// Confirm the deal to get the filled price and dealId.
-	var confirm capitalConfirm
-	if err := a.get(ctx, "/api/v1/confirms/"+result.DealReference, &confirm); err != nil {
+	confirm, err := a.confirm(ctx, result.DealReference)
+	if err != nil {
 		return broker.TradeReceipt{
 			BrokerTradeID: "pending:" + result.DealReference,
 			Symbol:        req.Symbol,
@@ -298,6 +299,30 @@ type capitalConfirm struct {
 	StopLevel   float64 `json:"stopLevel"`
 	ProfitLevel float64 `json:"profitLevel"`
 	Date        string  `json:"date"`
+	// Where else a refusal may say why, and how each deal it touched ended.
+	RejectReason  string `json:"rejectReason"`
+	ErrorCode     string `json:"errorCode"`
+	AffectedDeals []struct {
+		DealID string `json:"dealId"`
+		Status string `json:"status"`
+	} `json:"affectedDeals"`
+}
+
+// confirm reads Capital.com's confirmation of a deal. A refusal is logged with the whole answer: its reason isn't
+// always in reason (the first refusal seen, 2026-10-27, had none there).
+func (a *Adapter) confirm(ctx context.Context, dealReference string) (capitalConfirm, error) {
+	var raw json.RawMessage
+	if err := a.get(ctx, "/api/v1/confirms/"+dealReference, &raw); err != nil {
+		return capitalConfirm{}, err
+	}
+	var c capitalConfirm
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return capitalConfirm{}, err
+	}
+	if _, refused := c.rejected(); refused {
+		log.Printf("capital: deal %s refused: %s", dealReference, raw)
+	}
+	return c, nil
 }
 
 // rejected says whether Capital.com refused the deal, and why in its own words: dealStatus anything but ACCEPTED (or
@@ -311,6 +336,19 @@ func (c capitalConfirm) rejected() (string, bool) {
 		return "", false // an answer without a verdict: as before, the deal stands
 	}
 	why := strings.TrimSpace(c.Reason)
+	for _, alt := range []string{c.RejectReason, c.ErrorCode} {
+		if why == "" || strings.EqualFold(why, "SUCCESS") {
+			why = strings.TrimSpace(alt)
+		}
+	}
+	if why == "" {
+		for _, d := range c.AffectedDeals {
+			if d.Status != "" {
+				why = "deal " + strings.ToLower(d.Status)
+				break
+			}
+		}
+	}
 	if why == "" {
 		why = "no reason given"
 	}
@@ -386,9 +424,8 @@ func (a *Adapter) placeLimitOrder(ctx context.Context, req broker.TradeRequest) 
 	// This mirrors what placeMarketOrder does; without it we only have the
 	// temporary dealReference which does not match the dealId returned by
 	// OpenOrders(), making source-lookup impossible.
-	var confirm capitalConfirm
 	dealID := result.DealReference // fallback if confirm call fails
-	if err := a.get(ctx, "/api/v1/confirms/"+result.DealReference, &confirm); err == nil {
+	if confirm, err := a.confirm(ctx, result.DealReference); err == nil {
 		if why, rejected := confirm.rejected(); rejected {
 			return broker.TradeReceipt{}, fmt.Errorf("capital limit order confirm rejected: %s", why)
 		}
