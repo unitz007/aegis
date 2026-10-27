@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -239,7 +240,8 @@ func (a *accounts) status(ctx context.Context) (any, error) {
 			dir = directionOf(o.Units)
 		}
 		pending = append(pending, map[string]any{
-			"symbol": o.Symbol, "direction": dir, "units": absInt(o.Units), "order_type": strings.ToLower(o.OrderType),
+			"order_id": o.BrokerOrderID,
+			"symbol":   o.Symbol, "direction": dir, "units": absInt(o.Units), "order_type": strings.ToLower(o.OrderType),
 			"level": o.Level, "stop_loss": o.StopLoss, "take_profit": o.TakeProfit, "created_at": o.CreatedAt,
 		})
 	}
@@ -291,11 +293,54 @@ func (a *accounts) market(ctx context.Context) (any, error) {
 		if hasRules {
 			if r, err := rules.MarketDealingRules(ctx, sym); err == nil {
 				m["min_size"], m["max_size"] = r.MinDealSize, r.MaxDealSize
+				if r.MarginPercent > 0 {
+					m["margin_percent"] = r.MarginPercent // the share of a position's value held as margin
+				}
 			}
 		}
 		markets[sym] = m
 	}
 	return map[string]any{"markets": markets}, nil
+}
+
+// cancel implements /order/cancel: takes one waiting order off the account, by its id. It checks the order is
+// there first (and says which it was), and a broker's refusal is answered in its own words, not as a fault. It never
+// touches an open position.
+func (a *accounts) cancel(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		OrderID string `json:"order_id"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	id := strings.TrimSpace(req.OrderID)
+	if id == "" {
+		return map[string]any{"cancelled": false, "reason": "which order? order_id is required"}, nil
+	}
+	orders, err := e.Broker.OpenOrders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range orders {
+		if o.BrokerOrderID != id {
+			continue
+		}
+		dir := strings.ToUpper(o.Direction)
+		if dir != "BUY" && dir != "SELL" {
+			dir = directionOf(o.Units)
+		}
+		order := map[string]any{"order_id": o.BrokerOrderID, "symbol": o.Symbol, "direction": dir, "units": absInt(o.Units),
+			"order_type": strings.ToLower(o.OrderType), "level": o.Level}
+		if err := e.Broker.CancelOrder(ctx, id); err != nil {
+			log.Printf("account: cancel %s: %v", id, err)
+			return map[string]any{"cancelled": false, "reason": err.Error(), "order": order}, nil
+		}
+		log.Printf("account: cancelled working order %s (%s %s)", id, dir, o.Symbol)
+		return map[string]any{"cancelled": true, "order": order}, nil
+	}
+	return map[string]any{"cancelled": false, "reason": "there is no waiting order with that id on this account (it may have filled or been cancelled already)"}, nil
 }
 
 // directionOf says whether a signed size is a long (BUY) or a short (SELL) position.

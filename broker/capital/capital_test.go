@@ -589,3 +589,35 @@ func TestCapitalAdapter_ConfirmReadsDealStatus(t *testing.T) {
 		}
 	}
 }
+
+// Capital.com's market details give the share of a position's value held as margin (instrument.marginFactor, a
+// percentage); a cancel is confirmed like a deal, and a refused one is an error.
+func TestCapitalAdapter_MarginRateAndConfirmedCancel(t *testing.T) {
+	cancelVerdict := `{"status":"DELETED","dealStatus":"ACCEPTED","dealId":"W1"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/markets/"):
+			_, _ = w.Write([]byte(`{"instrument":{"epic":"USDCAD","marginFactor":3.33,"marginFactorUnit":"PERCENTAGE"},"dealingRules":{"minDealSize":{"unit":"POINTS","value":1000},"maxDealSize":{"unit":"POINTS","value":5000000}}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/workingorders/W1":
+			_, _ = w.Write([]byte(`{"dealReference":"o_c1"}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/confirms/"):
+			_, _ = w.Write([]byte(cancelVerdict))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	a := newTestAdapter(srv.URL)
+	rules, err := a.MarketDealingRules(context.Background(), "USDCAD")
+	if err != nil || rules.MarginPercent != 3.33 || rules.MinDealSize != 1000 {
+		t.Errorf("rules: %+v %v", rules, err)
+	}
+	if err := a.CancelOrder(context.Background(), "W1"); err != nil {
+		t.Errorf("an accepted cancel: %v", err)
+	}
+	cancelVerdict = `{"dealStatus":"REJECTED","rejectReason":"ORDER_NOT_FOUND"}`
+	if err := a.CancelOrder(context.Background(), "W1"); err == nil || !strings.Contains(err.Error(), "ORDER_NOT_FOUND") {
+		t.Errorf("a refused cancel says why: %v", err)
+	}
+}

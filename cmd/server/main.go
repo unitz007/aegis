@@ -188,12 +188,15 @@ func main() {
 		mux.Handle("/account/status", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.status))
 		// /market/info — signed; live prices and deal-size rules for a few symbols (reads only, never trades)
 		mux.Handle("/market/info", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.market))
+		// /order/cancel — signed; takes one waiting order off the account, by its id (never touches a position)
+		mux.Handle("/order/cancel", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.cancel))
 		mux.Handle("/account/key", keyHandler(sealPublic))
 		mux.Handle("/brokers", brokersHandler(registry, allowAccountLive))
 	} else {
 		mux.Handle("/account/check", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/account/status", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/market/info", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/order/cancel", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}
 
 	// /admin/ — owner's pause switch and status. Off unless ADMIN_TOKEN is set.

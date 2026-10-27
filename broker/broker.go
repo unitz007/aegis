@@ -48,6 +48,8 @@ type Port interface {
 type DealingRules struct {
 	MinDealSize float64
 	MaxDealSize float64
+	// MarginPercent is the share of a position's value the broker holds as margin (3.33 for 30:1); 0 when unknown.
+	MarginPercent float64
 }
 
 // DealingRulesProvider is an optional capability a Port may expose.
@@ -135,7 +137,7 @@ type OpenOrder struct {
 	// Source distinguishes human-placed orders from algo-placed orders.
 	// Human-placed orders (Source == "human") are NEVER flip-cancelled by the
 	// executor — this is a safety invariant (#4).
-	Source    string `json:"source,omitempty"`    // "auto" | "human"
+	Source    string `json:"source,omitempty"` // "auto" | "human"
 	TradeType string `json:"trade_type,omitempty"`
 }
 

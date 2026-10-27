@@ -419,7 +419,7 @@ func TestStatus_ReportsOpenTradesAndOrdersWithoutChangingAnything(t *testing.T) 
 		t.Errorf("how it is doing: %v", open[0])
 	}
 	pending := m["pending_orders"].([]map[string]any)
-	if len(pending) != 1 || pending[0]["symbol"] != "USDCHF" || pending[0]["direction"] != "SELL" || pending[0]["units"] != 5000 || pending[0]["level"] != 0.93584 || pending[0]["order_type"] != "limit" {
+	if len(pending) != 1 || pending[0]["symbol"] != "USDCHF" || pending[0]["direction"] != "SELL" || pending[0]["units"] != 5000 || pending[0]["level"] != 0.93584 || pending[0]["order_type"] != "limit" || pending[0]["order_id"] == "" {
 		t.Errorf("the waiting order: %v", pending)
 	}
 	if pb.TradeCount() != trades || pb.OrderCount() != orders {
@@ -461,7 +461,7 @@ func TestMarket_PricesAndDealSizeRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	pb := r.brokers["a@b.co"]
-	pb.DealingRules = map[string]broker.DealingRules{"EURUSD": {MinDealSize: 1000, MaxDealSize: 5_000_000}}
+	pb.DealingRules = map[string]broker.DealingRules{"EURUSD": {MinDealSize: 1000, MaxDealSize: 5_000_000, MarginPercent: 3.33}}
 	body, _ := json.Marshal(map[string]any{"symbols": []string{"eurusd", "GBPJPY", "A", "B", "C", "D"}})
 	ctx = webhook.WithAccountRequestBody(ctx, body)
 	info, err := r.a.market(ctx)
@@ -470,7 +470,7 @@ func TestMarket_PricesAndDealSizeRules(t *testing.T) {
 	}
 	markets := info.(map[string]any)["markets"].(map[string]any)
 	eur := markets["EURUSD"].(map[string]any)
-	if eur["min_size"] != 1000.0 || eur["max_size"] != 5_000_000.0 {
+	if eur["min_size"] != 1000.0 || eur["max_size"] != 5_000_000.0 || eur["margin_percent"] != 3.33 {
 		t.Errorf("the broker's deal-size rules: %v", eur)
 	}
 	if _, ok := eur["bid"]; !ok {
@@ -481,5 +481,61 @@ func TestMarket_PricesAndDealSizeRules(t *testing.T) {
 	}
 	if pb.TradeCount() != 0 || pb.OrderCount() != 0 {
 		t.Error("a read changes nothing")
+	}
+}
+
+// /order/cancel takes one waiting order off the account, by its id, and says which it was; an id that isn't a waiting
+// order on this account (another account's, one that filled) cancels nothing and says so; an open position is never
+// touched.
+func TestCancel_TakesOneWaitingOrderOffItsOwnAccount(t *testing.T) {
+	r := newRig(t, false)
+	ctx, _, err := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := r.brokers["a@b.co"]
+	if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: "EURUSD", Units: 10000, OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.13}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sym := range []string{"NZDJPY", "GBPJPY"} {
+		if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: sym, Units: -5100, OrderType: "limit", EntryPrice: 90.154, StopLoss: 90.5, TakeProfit: 88.7}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orders, _ := pb.OpenOrders(ctx)
+	var nzd string
+	for _, o := range orders {
+		if o.Symbol == "NZDJPY" {
+			nzd = o.BrokerOrderID
+		}
+	}
+	cancel := func(ctx context.Context, id string) map[string]any {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"order_id": id})
+		out, err := r.a.cancel(webhook.WithAccountRequestBody(ctx, body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.(map[string]any)
+	}
+
+	// Another account can't cancel it.
+	ctx2, _, _ := r.a.resolve(context.Background(), r.account(t, "capital", "demo", map[string]string{"api_key": "k2", "email": "other@b.co", "password": "x"}))
+	if got := cancel(ctx2, nzd); got["cancelled"] != false || pb.OrderCount() != 2 {
+		t.Fatalf("another account's order: %v", got)
+	}
+	got := cancel(ctx, nzd)
+	order, _ := got["order"].(map[string]any)
+	if got["cancelled"] != true || order["symbol"] != "NZDJPY" || order["direction"] != "SELL" || order["level"] != 90.154 {
+		t.Fatalf("cancelled, saying which: %v", got)
+	}
+	if pb.OrderCount() != 1 || pb.TradeCount() != 1 {
+		t.Errorf("only that order goes; the other order and the open position stay: orders %d, trades %d", pb.OrderCount(), pb.TradeCount())
+	}
+	if again := cancel(ctx, nzd); again["cancelled"] != false || !strings.Contains(fmt.Sprint(again["reason"]), "no waiting order") {
+		t.Errorf("twice: %v", again)
+	}
+	if none := cancel(ctx, ""); none["cancelled"] != false {
+		t.Errorf("no id: %v", none)
 	}
 }

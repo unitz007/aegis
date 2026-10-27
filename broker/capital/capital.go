@@ -619,11 +619,30 @@ func (a *Adapter) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 }
 
 // CancelOrder deletes a pending working order by its deal ID.
+//
+// Capital.com answers with a dealReference whose confirmation says whether it was done (dealStatus), as for placing:
+// a refused cancel is an error, never a quiet success.
 func (a *Adapter) CancelOrder(ctx context.Context, brokerOrderID string) error {
 	if err := a.ensureSession(ctx); err != nil {
 		return err
 	}
-	return a.delete(ctx, "/api/v1/workingorders/"+brokerOrderID)
+	var result struct {
+		DealReference string `json:"dealReference"`
+	}
+	if err := a.deleteInto(ctx, "/api/v1/workingorders/"+brokerOrderID, &result); err != nil {
+		return err
+	}
+	if result.DealReference == "" {
+		return nil // nothing to confirm with: the delete itself was accepted
+	}
+	confirm, err := a.confirm(ctx, result.DealReference)
+	if err != nil {
+		return fmt.Errorf("capital cancel %s: couldn't confirm it: %w", brokerOrderID, err)
+	}
+	if why, refused := confirm.rejected(); refused {
+		return fmt.Errorf("capital cancel %s rejected: %s", brokerOrderID, why)
+	}
+	return nil
 }
 
 // AmendOrder updates the level, SL, or TP of a pending working order.
@@ -767,6 +786,10 @@ func (a *Adapter) MarketDealingRules(ctx context.Context, symbol string) (broker
 		return broker.DealingRules{}, err
 	}
 	var resp struct {
+		Instrument struct {
+			MarginFactor     float64 `json:"marginFactor"`
+			MarginFactorUnit string  `json:"marginFactorUnit"`
+		} `json:"instrument"`
 		DealingRules struct {
 			MinDealSize struct {
 				Value float64 `json:"value"`
@@ -779,10 +802,14 @@ func (a *Adapter) MarketDealingRules(ctx context.Context, symbol string) (broker
 	if err := a.get(ctx, "/api/v1/markets/"+capitalEpic(symbol), &resp); err != nil {
 		return broker.DealingRules{}, fmt.Errorf("capital dealing rules %s: %w", symbol, err)
 	}
-	return broker.DealingRules{
+	rules := broker.DealingRules{
 		MinDealSize: resp.DealingRules.MinDealSize.Value,
 		MaxDealSize: resp.DealingRules.MaxDealSize.Value,
-	}, nil
+	}
+	if strings.EqualFold(resp.Instrument.MarginFactorUnit, "PERCENTAGE") {
+		rules.MarginPercent = resp.Instrument.MarginFactor // the share of a position's value held as margin
+	}
+	return rules, nil
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -825,12 +852,17 @@ func (a *Adapter) put(ctx context.Context, path string, body, out any) error {
 }
 
 func (a *Adapter) delete(ctx context.Context, path string) error {
+	return a.deleteInto(ctx, path, nil)
+}
+
+// deleteInto is delete, reading what Capital.com answers into out (nil: nothing).
+func (a *Adapter) deleteInto(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, a.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
 	a.setHeaders(req)
-	return a.do(req, nil)
+	return a.do(req, out)
 }
 
 func (a *Adapter) setHeaders(req *http.Request) {
