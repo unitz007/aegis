@@ -541,3 +541,49 @@ func TestPlaceTrade_BelowTheMinimumIsRefusedNeverRaised(t *testing.T) {
 		t.Errorf("crypto is not held to the forex minimum: %v", err)
 	}
 }
+
+// Capital.com says whether a deal was accepted in dealStatus; status is the position's or order's state. A working
+// order it refused (dealStatus REJECTED, with a dealId) was reported as placed until 2026-10-27, when two approved
+// orders never reached the person's account.
+func TestCapitalAdapter_ConfirmReadsDealStatus(t *testing.T) {
+	for _, c := range []struct {
+		name, confirm string
+		limit         bool
+		wantErr       string
+		wantID        string
+	}{
+		{"a working order refused", `{"date":"2026-10-27T13:17:44","status":"DELETED","dealStatus":"REJECTED","reason":"RISK_CHECK","dealReference":"o_1","dealId":"00000000-6e90-4101-0472-7c8d0015549e"}`, true, "RISK_CHECK", ""},
+		{"a market order refused", `{"status":"CLOSED","dealStatus":"REJECTED","reason":"MARKET_CLOSED","dealId":"D2"}`, false, "MARKET_CLOSED", ""},
+		{"refused with no reason", `{"dealStatus":"REJECTED"}`, true, "no reason given", ""},
+		{"a working order accepted", `{"status":"OPEN","dealStatus":"ACCEPTED","dealId":"D3","level":1.0850}`, true, "", "limit:D3"},
+		{"a market order accepted", `{"status":"OPEN","dealStatus":"ACCEPTED","dealId":"D4","level":1.0851}`, false, "", "D4"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/workingorders" || r.URL.Path == "/api/v1/positions"):
+				_, _ = w.Write([]byte(`{"dealReference":"o_1"}`))
+			case strings.HasPrefix(r.URL.Path, "/api/v1/confirms/"):
+				_, _ = w.Write([]byte(c.confirm))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		a := newTestAdapter(srv.URL)
+		req := broker.TradeRequest{Symbol: "EUR/USD", Units: 1000, EntryPrice: 1.0850, StopLoss: 1.0810, TakeProfit: 1.0910}
+		var got broker.TradeReceipt
+		var err error
+		if c.limit {
+			got, err = a.placeLimitOrder(context.Background(), req)
+		} else {
+			got, err = a.placeMarketOrder(context.Background(), req)
+		}
+		srv.Close()
+		switch {
+		case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+			t.Errorf("%s: want a refusal saying %q, got %v (%+v)", c.name, c.wantErr, err, got)
+		case c.wantErr == "" && (err != nil || got.BrokerTradeID != c.wantID):
+			t.Errorf("%s: want %q, got %q, %v", c.name, c.wantID, got.BrokerTradeID, err)
+		}
+	}
+}

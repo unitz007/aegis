@@ -253,18 +253,7 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 	}
 
 	// Confirm the deal to get the filled price and dealId.
-	var confirm struct {
-		Status      string  `json:"status"`
-		Reason      string  `json:"reason"`
-		DealID      string  `json:"dealId"`
-		Epic        string  `json:"epic"`
-		Direction   string  `json:"direction"`
-		Size        float64 `json:"size"`
-		Level       float64 `json:"level"` // fill price
-		StopLevel   float64 `json:"stopLevel"`
-		ProfitLevel float64 `json:"profitLevel"`
-		Date        string  `json:"date"`
-	}
+	var confirm capitalConfirm
 	if err := a.get(ctx, "/api/v1/confirms/"+result.DealReference, &confirm); err != nil {
 		return broker.TradeReceipt{
 			BrokerTradeID: "pending:" + result.DealReference,
@@ -277,8 +266,8 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 			Broker:        "capital",
 		}, nil
 	}
-	if confirm.Status == "REJECTED" {
-		return broker.TradeReceipt{}, fmt.Errorf("capital confirm rejected: %s", confirm.Reason)
+	if why, rejected := confirm.rejected(); rejected {
+		return broker.TradeReceipt{}, fmt.Errorf("capital confirm rejected: %s", why)
 	}
 	return broker.TradeReceipt{
 		BrokerTradeID: confirm.DealID,
@@ -291,6 +280,41 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 		DecisionID:    req.DecisionID,
 		Broker:        "capital",
 	}, nil
+}
+
+// capitalConfirm is Capital.com's answer to GET /api/v1/confirms/{dealReference}: whether the deal was accepted is
+// dealStatus ("ACCEPTED" / "REJECTED"); status is the position's or order's state ("OPEN", …). Until 2026-10-27 only
+// status was read, so a rejected order was reported as placed: two working orders the person approved (USDCAD,
+// USDJPY) were never on their account.
+type capitalConfirm struct {
+	Status      string  `json:"status"`
+	DealStatus  string  `json:"dealStatus"`
+	Reason      string  `json:"reason"`
+	DealID      string  `json:"dealId"`
+	Epic        string  `json:"epic"`
+	Direction   string  `json:"direction"`
+	Size        float64 `json:"size"`
+	Level       float64 `json:"level"` // fill price
+	StopLevel   float64 `json:"stopLevel"`
+	ProfitLevel float64 `json:"profitLevel"`
+	Date        string  `json:"date"`
+}
+
+// rejected says whether Capital.com refused the deal, and why in its own words: dealStatus anything but ACCEPTED (or
+// a status of REJECTED) is a refusal.
+func (c capitalConfirm) rejected() (string, bool) {
+	ds := strings.ToUpper(strings.TrimSpace(c.DealStatus))
+	if ds == "ACCEPTED" && !strings.EqualFold(c.Status, "REJECTED") {
+		return "", false
+	}
+	if ds == "" && !strings.EqualFold(c.Status, "REJECTED") {
+		return "", false // an answer without a verdict: as before, the deal stands
+	}
+	why := strings.TrimSpace(c.Reason)
+	if why == "" {
+		why = "no reason given"
+	}
+	return why, true
 }
 
 // placeLimitOrder submits a LIMIT working order via POST /api/v1/workingorders.
@@ -362,19 +386,11 @@ func (a *Adapter) placeLimitOrder(ctx context.Context, req broker.TradeRequest) 
 	// This mirrors what placeMarketOrder does; without it we only have the
 	// temporary dealReference which does not match the dealId returned by
 	// OpenOrders(), making source-lookup impossible.
-	var confirm struct {
-		Status      string  `json:"status"`
-		Reason      string  `json:"reason"`
-		DealID      string  `json:"dealId"`
-		Level       float64 `json:"level"`
-		StopLevel   float64 `json:"stopLevel"`
-		ProfitLevel float64 `json:"profitLevel"`
-		Date        string  `json:"date"`
-	}
+	var confirm capitalConfirm
 	dealID := result.DealReference // fallback if confirm call fails
 	if err := a.get(ctx, "/api/v1/confirms/"+result.DealReference, &confirm); err == nil {
-		if confirm.Status == "REJECTED" {
-			return broker.TradeReceipt{}, fmt.Errorf("capital limit order confirm rejected: %s", confirm.Reason)
+		if why, rejected := confirm.rejected(); rejected {
+			return broker.TradeReceipt{}, fmt.Errorf("capital limit order confirm rejected: %s", why)
 		}
 		if confirm.DealID != "" {
 			dealID = confirm.DealID
