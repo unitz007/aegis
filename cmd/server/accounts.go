@@ -228,7 +228,8 @@ func (a *accounts) status(ctx context.Context) (any, error) {
 	openTrades := make([]map[string]any, 0, len(trades))
 	for _, t := range trades {
 		openTrades = append(openTrades, map[string]any{
-			"symbol": t.Symbol, "direction": directionOf(t.Units), "units": absInt(t.Units),
+			"trade_id": t.BrokerTradeID,
+			"symbol":   t.Symbol, "direction": directionOf(t.Units), "units": absInt(t.Units),
 			"open_price": t.OpenPrice, "current_price": t.CurrentPrice, "unrealized_pnl": t.UnrealizedPnL,
 			"stop_loss": t.StopLoss, "take_profit": t.TakeProfit, "opened_at": t.OpenedAt,
 		})
@@ -341,6 +342,183 @@ func (a *accounts) cancel(ctx context.Context) (any, error) {
 		return map[string]any{"cancelled": true, "order": order}, nil
 	}
 	return map[string]any{"cancelled": false, "reason": "there is no waiting order with that id on this account (it may have filled or been cancelled already)"}, nil
+}
+
+// tradeOf is an open position as the endpoints that change one describe it.
+func tradeOf(t broker.OpenTrade) map[string]any {
+	return map[string]any{"trade_id": t.BrokerTradeID, "symbol": t.Symbol, "direction": directionOf(t.Units),
+		"units": absInt(t.Units), "open_price": t.OpenPrice, "current_price": t.CurrentPrice,
+		"unrealized_pnl": t.UnrealizedPnL, "stop_loss": t.StopLoss, "take_profit": t.TakeProfit}
+}
+
+// findTrade is the open position with that id on the account in ctx, if there is one.
+func findTrade(ctx context.Context, e *aegis.Executor, id string) (broker.OpenTrade, bool, error) {
+	trades, err := e.Broker.OpenTrades(ctx)
+	if err != nil {
+		return broker.OpenTrade{}, false, err
+	}
+	for _, t := range trades {
+		if t.BrokerTradeID == id {
+			return t, true, nil
+		}
+	}
+	return broker.OpenTrade{}, false, nil
+}
+
+const noSuchTrade = "there is no open trade with that id on this account (it may have closed already)"
+
+// closeTrade implements /position/close: closes one open position at the market, by its id, and says which it was.
+// Another account's id, or one already closed, closes nothing and says so; a waiting order is never touched.
+func (a *accounts) closeTrade(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		TradeID string `json:"trade_id"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	id := strings.TrimSpace(req.TradeID)
+	if id == "" {
+		return map[string]any{"closed": false, "reason": "which trade? trade_id is required"}, nil
+	}
+	t, found, err := findTrade(ctx, e, id)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return map[string]any{"closed": false, "reason": noSuchTrade}, nil
+	}
+	if err := e.Broker.CloseTrade(ctx, id); err != nil {
+		log.Printf("account: close %s: %v", id, err)
+		return map[string]any{"closed": false, "reason": err.Error(), "trade": tradeOf(t)}, nil
+	}
+	log.Printf("account: closed trade %s (%s %s)", id, directionOf(t.Units), t.Symbol)
+	return map[string]any{"closed": true, "trade": tradeOf(t)}, nil
+}
+
+// levelsProblem says, in plain words, what is wrong with a stop and target for a position or order in direction dir
+// at price (the market for a position, the order's level for an order); "" when they sit on the right sides. A
+// price of 0 (not known) checks nothing.
+func levelsProblem(dir string, price, stop, target float64, at string) string {
+	if price <= 0 {
+		return ""
+	}
+	long := dir == "BUY"
+	switch {
+	case stop > 0 && long && stop >= price:
+		return fmt.Sprintf("a buy's stop must be below %s (%g); %g isn't", at, price, stop)
+	case stop > 0 && !long && stop <= price:
+		return fmt.Sprintf("a sell's stop must be above %s (%g); %g isn't", at, price, stop)
+	case target > 0 && long && target <= price:
+		return fmt.Sprintf("a buy's target must be above %s (%g); %g isn't", at, price, target)
+	case target > 0 && !long && target >= price:
+		return fmt.Sprintf("a sell's target must be below %s (%g); %g isn't", at, price, target)
+	}
+	return ""
+}
+
+// amendTrade implements /position/amend: moves the stop and/or target of one open position. What isn't given is
+// sent as it is now, so a change to one never clears the other.
+func (a *accounts) amendTrade(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		TradeID    string  `json:"trade_id"`
+		StopLoss   float64 `json:"stop_loss"`
+		TakeProfit float64 `json:"take_profit"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	id := strings.TrimSpace(req.TradeID)
+	switch {
+	case id == "":
+		return map[string]any{"amended": false, "reason": "which trade? trade_id is required"}, nil
+	case req.StopLoss <= 0 && req.TakeProfit <= 0:
+		return map[string]any{"amended": false, "reason": "nothing to change: give a stop_loss and/or a take_profit"}, nil
+	}
+	t, found, err := findTrade(ctx, e, id)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return map[string]any{"amended": false, "reason": noSuchTrade}, nil
+	}
+	sl, tp := t.StopLoss, t.TakeProfit
+	if req.StopLoss > 0 {
+		sl = req.StopLoss
+	}
+	if req.TakeProfit > 0 {
+		tp = req.TakeProfit
+	}
+	if why := levelsProblem(directionOf(t.Units), t.CurrentPrice, req.StopLoss, req.TakeProfit, "the current price"); why != "" {
+		return map[string]any{"amended": false, "reason": why, "trade": tradeOf(t)}, nil
+	}
+	if err := e.Broker.AmendTrade(ctx, id, sl, tp); err != nil {
+		log.Printf("account: amend trade %s: %v", id, err)
+		return map[string]any{"amended": false, "reason": err.Error(), "trade": tradeOf(t)}, nil
+	}
+	log.Printf("account: amended trade %s (%s %s): stop %g, target %g", id, directionOf(t.Units), t.Symbol, sl, tp)
+	return map[string]any{"amended": true, "trade": tradeOf(t), "stop_loss": sl, "take_profit": tp}, nil
+}
+
+// amendOrder implements /order/amend: moves the level, stop and/or target of one waiting order. What isn't given is
+// sent as it is now.
+func (a *accounts) amendOrder(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		OrderID    string  `json:"order_id"`
+		Level      float64 `json:"level"`
+		StopLoss   float64 `json:"stop_loss"`
+		TakeProfit float64 `json:"take_profit"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	id := strings.TrimSpace(req.OrderID)
+	switch {
+	case id == "":
+		return map[string]any{"amended": false, "reason": "which order? order_id is required"}, nil
+	case req.Level <= 0 && req.StopLoss <= 0 && req.TakeProfit <= 0:
+		return map[string]any{"amended": false, "reason": "nothing to change: give a level, stop_loss and/or take_profit"}, nil
+	}
+	orders, err := e.Broker.OpenOrders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range orders {
+		if o.BrokerOrderID != id {
+			continue
+		}
+		dir := strings.ToUpper(o.Direction)
+		if dir != "BUY" && dir != "SELL" {
+			dir = directionOf(o.Units)
+		}
+		order := map[string]any{"order_id": o.BrokerOrderID, "symbol": o.Symbol, "direction": dir, "units": absInt(o.Units),
+			"order_type": strings.ToLower(o.OrderType), "level": o.Level, "stop_loss": o.StopLoss, "take_profit": o.TakeProfit}
+		level, sl, tp := o.Level, o.StopLoss, o.TakeProfit
+		if req.Level > 0 {
+			level = req.Level
+		}
+		if req.StopLoss > 0 {
+			sl = req.StopLoss
+		}
+		if req.TakeProfit > 0 {
+			tp = req.TakeProfit
+		}
+		if why := levelsProblem(dir, level, sl, tp, "the order's level"); why != "" {
+			return map[string]any{"amended": false, "reason": why, "order": order}, nil
+		}
+		if err := e.Broker.AmendOrder(ctx, id, level, sl, tp); err != nil {
+			log.Printf("account: amend order %s: %v", id, err)
+			return map[string]any{"amended": false, "reason": err.Error(), "order": order}, nil
+		}
+		log.Printf("account: amended working order %s (%s %s): level %g, stop %g, target %g", id, dir, o.Symbol, level, sl, tp)
+		return map[string]any{"amended": true, "order": order, "level": level, "stop_loss": sl, "take_profit": tp}, nil
+	}
+	return map[string]any{"amended": false, "reason": "there is no waiting order with that id on this account (it may have filled or been cancelled already)"}, nil
 }
 
 // directionOf says whether a signed size is a long (BUY) or a short (SELL) position.

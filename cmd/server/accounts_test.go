@@ -539,3 +539,77 @@ func TestCancel_TakesOneWaitingOrderOffItsOwnAccount(t *testing.T) {
 		t.Errorf("no id: %v", none)
 	}
 }
+
+// /position/close closes one open position by its id and says which it was; /position/amend moves its stop or target,
+// keeping what isn't given; /order/amend does the same for a waiting order. Another account's id changes nothing, a
+// stop or target on the wrong side is refused before the broker is asked, and a waiting order is never closed.
+func TestCloseAndAmend_OneTradeOrOrderOnItsOwnAccount(t *testing.T) {
+	r := newRig(t, false)
+	ctx, _, err := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := r.brokers["a@b.co"]
+	if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: "EURUSD", Units: 10000, OrderType: "market", EntryPrice: 1.1, StopLoss: 1.09, TakeProfit: 1.13}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pb.PlaceTrade(ctx, broker.TradeRequest{Symbol: "EURGBP", Units: -20000, OrderType: "limit", EntryPrice: 0.83623, StopLoss: 0.836424, TakeProfit: 0.83477}); err != nil {
+		t.Fatal(err)
+	}
+	trades, _ := pb.OpenTrades(ctx)
+	orders, _ := pb.OpenOrders(ctx)
+	tradeID, orderID := trades[0].BrokerTradeID, orders[0].BrokerOrderID
+	call := func(ctx context.Context, f func(context.Context) (any, error), body map[string]any) map[string]any {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		out, err := f(webhook.WithAccountRequestBody(ctx, b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.(map[string]any)
+	}
+
+	// The status says each open trade's id, which the others take.
+	info, _ := r.a.status(ctx)
+	if raw, _ := json.Marshal(info); !strings.Contains(string(raw), `"trade_id":"`+tradeID+`"`) {
+		t.Errorf("status names the trade: %s", raw)
+	}
+
+	// A waiting order: its stop moves, the rest stays; a stop below a sell's level is refused.
+	got := call(ctx, r.a.amendOrder, map[string]any{"order_id": orderID, "stop_loss": 0.8368})
+	if got["amended"] != true || got["stop_loss"] != 0.8368 || got["level"] != 0.83623 || got["take_profit"] != 0.83477 {
+		t.Fatalf("order's stop moved, the rest kept: %v", got)
+	}
+	if o, _ := pb.OpenOrders(ctx); o[0].StopLoss != 0.8368 || o[0].TakeProfit != 0.83477 {
+		t.Errorf("at the broker: %+v", o[0])
+	}
+	if bad := call(ctx, r.a.amendOrder, map[string]any{"order_id": orderID, "stop_loss": 0.835}); bad["amended"] != false || !strings.Contains(fmt.Sprint(bad["reason"]), "above") {
+		t.Errorf("a sell's stop below its level: %v", bad)
+	}
+	if closed := call(ctx, r.a.closeTrade, map[string]any{"trade_id": orderID}); closed["closed"] != false || pb.OrderCount() != 1 {
+		t.Errorf("a waiting order is never closed: %v", closed)
+	}
+
+	// The open trade: another account can't touch it; its target moves; then it closes.
+	ctx2, _, _ := r.a.resolve(context.Background(), r.account(t, "capital", "demo", map[string]string{"api_key": "k2", "email": "other@b.co", "password": "x"}))
+	if got := call(ctx2, r.a.closeTrade, map[string]any{"trade_id": tradeID}); got["closed"] != false || pb.TradeCount() != 1 {
+		t.Fatalf("another account's trade: %v", got)
+	}
+	if got := call(ctx2, r.a.amendTrade, map[string]any{"trade_id": tradeID, "take_profit": 1.2}); got["amended"] != false {
+		t.Fatalf("another account's trade: %v", got)
+	}
+	got = call(ctx, r.a.amendTrade, map[string]any{"trade_id": tradeID, "take_profit": 1.14})
+	if got["amended"] != true || got["take_profit"] != 1.14 || got["stop_loss"] != 1.09 {
+		t.Fatalf("target moved, stop kept: %v", got)
+	}
+	if none := call(ctx, r.a.amendTrade, map[string]any{"trade_id": tradeID}); none["amended"] != false {
+		t.Errorf("nothing to change: %v", none)
+	}
+	got = call(ctx, r.a.closeTrade, map[string]any{"trade_id": tradeID})
+	if tr, _ := got["trade"].(map[string]any); got["closed"] != true || tr["symbol"] != "EURUSD" || tr["direction"] != "BUY" || pb.TradeCount() != 0 || pb.OrderCount() != 1 {
+		t.Fatalf("closed, saying which, the order kept: %v", got)
+	}
+	if again := call(ctx, r.a.closeTrade, map[string]any{"trade_id": tradeID}); again["closed"] != false || !strings.Contains(fmt.Sprint(again["reason"]), "no open trade") {
+		t.Errorf("twice: %v", again)
+	}
+}

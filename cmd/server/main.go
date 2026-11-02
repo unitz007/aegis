@@ -190,6 +190,11 @@ func main() {
 		mux.Handle("/market/info", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.market))
 		// /order/cancel — signed; takes one waiting order off the account, by its id (never touches a position)
 		mux.Handle("/order/cancel", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.cancel))
+		// /order/amend, /position/close, /position/amend — signed; change one waiting order, or close or change one
+		// open position, by its id (each confirmed with the broker; another account's id changes nothing)
+		mux.Handle("/order/amend", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.amendOrder))
+		mux.Handle("/position/close", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.closeTrade))
+		mux.Handle("/position/amend", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.amendTrade))
 		mux.Handle("/account/key", keyHandler(sealPublic))
 		mux.Handle("/brokers", brokersHandler(registry, allowAccountLive))
 	} else {
@@ -197,6 +202,9 @@ func main() {
 		mux.Handle("/account/status", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/market/info", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/order/cancel", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/order/amend", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/position/close", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/position/amend", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}
 
 	// /admin/ — owner's pause switch and status. Off unless ADMIN_TOKEN is set.

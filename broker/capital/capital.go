@@ -646,7 +646,8 @@ func (a *Adapter) CancelOrder(ctx context.Context, brokerOrderID string) error {
 }
 
 // AmendOrder updates the level, SL, or TP of a pending working order.
-// Capital uses PUT /api/v1/workingorders/{dealId}.
+// Capital uses PUT /api/v1/workingorders/{dealId}. Its confirmation says whether it was done (dealStatus), as for
+// placing: a refused change is an error, never a quiet success.
 func (a *Adapter) AmendOrder(ctx context.Context, brokerOrderID string, newLevel, newSL, newTP float64) error {
 	if err := a.ensureSession(ctx); err != nil {
 		return err
@@ -666,7 +667,29 @@ func (a *Adapter) AmendOrder(ctx context.Context, brokerOrderID string, newLevel
 	if newTP > 0 {
 		pl.ProfitLevel = &newTP
 	}
-	return a.put(ctx, "/api/v1/workingorders/"+brokerOrderID, pl, nil)
+	var resp struct {
+		DealReference string `json:"dealReference"`
+	}
+	if err := a.put(ctx, "/api/v1/workingorders/"+brokerOrderID, pl, &resp); err != nil {
+		return fmt.Errorf("capital amend order %s: %w", brokerOrderID, err)
+	}
+	return a.confirmed(ctx, "amend order", brokerOrderID, resp.DealReference)
+}
+
+// confirmed reads the confirmation of a change to an existing deal (close, amend): a refusal is an error saying
+// Capital.com's reason. No reference to confirm with means the request itself was accepted.
+func (a *Adapter) confirmed(ctx context.Context, what, dealID, dealReference string) error {
+	if dealReference == "" {
+		return nil
+	}
+	c, err := a.confirm(ctx, dealReference)
+	if err != nil {
+		return fmt.Errorf("capital %s %s: couldn't confirm it: %w", what, dealID, err)
+	}
+	if why, refused := c.rejected(); refused {
+		return fmt.Errorf("capital %s %s rejected: %s", what, dealID, why)
+	}
+	return nil
 }
 
 // Account returns the Capital.com account snapshot.
@@ -711,15 +734,18 @@ func (a *Adapter) Account(ctx context.Context) (broker.BrokerAccount, error) {
 	return broker.BrokerAccount{}, fmt.Errorf("capital: no accounts returned")
 }
 
-// CloseTrade closes a position by dealId.
+// CloseTrade closes a position by dealId, confirmed like a deal: a refused close is an error.
 func (a *Adapter) CloseTrade(ctx context.Context, brokerTradeID string) error {
 	if err := a.ensureSession(ctx); err != nil {
 		return err
 	}
-	if err := a.delete(ctx, "/api/v1/positions/"+brokerTradeID); err != nil {
+	var resp struct {
+		DealReference string `json:"dealReference"`
+	}
+	if err := a.deleteInto(ctx, "/api/v1/positions/"+brokerTradeID, &resp); err != nil {
 		return fmt.Errorf("capital close trade %s: %w", brokerTradeID, err)
 	}
-	return nil
+	return a.confirmed(ctx, "close trade", brokerTradeID, resp.DealReference)
 }
 
 // AmendTrade updates the stop-loss and/or take-profit on an open position.
@@ -745,7 +771,7 @@ func (a *Adapter) AmendTrade(ctx context.Context, brokerTradeID string, newSL, n
 	if err := a.put(ctx, "/api/v1/positions/"+brokerTradeID, body, &resp); err != nil {
 		return fmt.Errorf("capital amend trade %s: %w", brokerTradeID, err)
 	}
-	return nil
+	return a.confirmed(ctx, "amend trade", brokerTradeID, resp.DealReference)
 }
 
 // Ping verifies connectivity and auth by fetching the account list.

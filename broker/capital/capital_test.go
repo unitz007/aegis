@@ -621,3 +621,44 @@ func TestCapitalAdapter_MarginRateAndConfirmedCancel(t *testing.T) {
 		t.Errorf("a refused cancel says why: %v", err)
 	}
 }
+
+// Closing and changing a position or an order is confirmed like a deal: a refusal is an error with Capital.com's
+// reason, never a quiet success.
+func TestCapitalAdapter_ConfirmedCloseAndAmend(t *testing.T) {
+	verdict := `{"dealStatus":"ACCEPTED","status":"CLOSED"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/positions/P1",
+			r.Method == http.MethodPut && r.URL.Path == "/api/v1/positions/P1",
+			r.Method == http.MethodPut && r.URL.Path == "/api/v1/workingorders/W1":
+			_, _ = w.Write([]byte(`{"dealReference":"o_x1"}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/confirms/"):
+			_, _ = w.Write([]byte(verdict))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	a := newTestAdapter(srv.URL)
+	ctx := context.Background()
+	if err := a.CloseTrade(ctx, "P1"); err != nil {
+		t.Errorf("an accepted close: %v", err)
+	}
+	if err := a.AmendTrade(ctx, "P1", 1.09, 1.14); err != nil {
+		t.Errorf("an accepted amend: %v", err)
+	}
+	if err := a.AmendOrder(ctx, "W1", 0.836, 0.8368, 0.83477); err != nil {
+		t.Errorf("an accepted order amend: %v", err)
+	}
+	verdict = `{"dealStatus":"REJECTED","reason":"ATTACHED_ORDER_LEVEL_ERROR"}`
+	for name, err := range map[string]error{
+		"close":       a.CloseTrade(ctx, "P1"),
+		"amend":       a.AmendTrade(ctx, "P1", 1.09, 1.14),
+		"amend order": a.AmendOrder(ctx, "W1", 0.836, 0.8368, 0.83477),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "ATTACHED_ORDER_LEVEL_ERROR") {
+			t.Errorf("a refused %s says why: %v", name, err)
+		}
+	}
+}
