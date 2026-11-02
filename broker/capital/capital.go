@@ -475,6 +475,12 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 				Level       float64 `json:"level"`
 				StopLevel   float64 `json:"stopLevel"`
 				ProfitLevel float64 `json:"profitLevel"`
+				// Upl is Capital.com's own unrealised profit or loss, in Currency. Until 2026-11-02 it wasn't read
+				// (thought missing) and the P&L was worked out here in USD, which was then shown as the account's
+				// currency (EUR on the account that found it).
+				Upl            *float64 `json:"upl"`
+				Currency       string   `json:"currency"`
+				CreatedDateUTC string   `json:"createdDateUTC"`
 			} `json:"position"`
 			Market struct {
 				Epic  string  `json:"epic"`
@@ -541,6 +547,12 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 			pnl *= factor
 		}
 
+		pnlCurrency := "USD"
+		if p.Position.Upl != nil {
+			pnl, pnlCurrency = *p.Position.Upl, cleanCurrencyCode(p.Position.Currency)
+		}
+		opened, _ := time.Parse("2006-01-02T15:04:05.000", p.Position.CreatedDateUTC)
+
 		out = append(out, broker.OpenTrade{
 			BrokerTradeID: p.Position.DealID,
 			Symbol:        sym,
@@ -548,9 +560,10 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 			OpenPrice:     p.Position.Level,
 			CurrentPrice:  curPrice,
 			UnrealizedPnL: pnl,
+			PnLCurrency:   pnlCurrency,
 			StopLoss:      p.Position.StopLevel,
 			TakeProfit:    p.Position.ProfitLevel,
-			OpenedAt:      time.Time{},
+			OpenedAt:      opened,
 		})
 	}
 	return out, nil

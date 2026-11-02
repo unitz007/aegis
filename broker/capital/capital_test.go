@@ -662,3 +662,32 @@ func TestCapitalAdapter_ConfirmedCloseAndAmend(t *testing.T) {
 		}
 	}
 }
+
+// A position's P&L is Capital.com's own (upl, in the position's currency) and its open time is read; without upl it
+// is worked out as before, in USD, and said to be.
+func TestOpenTrades_CapitalsOwnProfitAndOpenTime(t *testing.T) {
+	body := `{"positions":[
+		{"position":{"dealId":"P1","direction":"SELL","size":20000,"level":0.83623,"stopLevel":0.8368,"profitLevel":0.83477,"upl":-12.34,"currency":"EUR","createdDateUTC":"2026-11-02T09:06:10.123"},
+		 "market":{"epic":"EURGBP","bid":0.8370,"offer":0.8371}},
+		{"position":{"dealId":"P2","direction":"BUY","size":1000,"level":1.1},"market":{"epic":"EURUSD","bid":1.105,"offer":1.1051}}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/positions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	trades, err := newTestAdapter(srv.URL).OpenTrades(context.Background())
+	if err != nil || len(trades) != 2 {
+		t.Fatalf("%v %v", trades, err)
+	}
+	eg := trades[0]
+	if eg.UnrealizedPnL != -12.34 || eg.PnLCurrency != "EUR" || eg.OpenedAt.Format("15:04") != "09:06" || eg.CurrentPrice != 0.8371 {
+		t.Errorf("Capital.com's own figure, its currency and open time: %+v", eg)
+	}
+	if eu := trades[1]; eu.PnLCurrency != "USD" || eu.UnrealizedPnL < 4.9 || eu.UnrealizedPnL > 5.1 {
+		t.Errorf("worked out without upl, in USD: %+v", eu)
+	}
+}

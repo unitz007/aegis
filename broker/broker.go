@@ -108,15 +108,17 @@ type TradeReceipt struct {
 
 // OpenTrade is a position currently held at the broker.
 type OpenTrade struct {
-	BrokerTradeID string    `json:"broker_trade_id"`
-	Symbol        string    `json:"symbol"`
-	Units         int       `json:"units"` // positive = long
-	OpenPrice     float64   `json:"open_price"`
-	CurrentPrice  float64   `json:"current_price"`
-	UnrealizedPnL float64   `json:"unrealized_pnl"`
-	TakeProfit    float64   `json:"take_profit,omitempty"`
-	StopLoss      float64   `json:"stop_loss,omitempty"`
-	OpenedAt      time.Time `json:"opened_at"`
+	BrokerTradeID string  `json:"broker_trade_id"`
+	Symbol        string  `json:"symbol"`
+	Units         int     `json:"units"` // positive = long
+	OpenPrice     float64 `json:"open_price"`
+	CurrentPrice  float64 `json:"current_price"`
+	UnrealizedPnL float64 `json:"unrealized_pnl"`
+	// PnLCurrency is the currency UnrealizedPnL is in, when the broker says ("" when it doesn't).
+	PnLCurrency string    `json:"pnl_currency,omitempty"`
+	TakeProfit  float64   `json:"take_profit,omitempty"`
+	StopLoss    float64   `json:"stop_loss,omitempty"`
+	OpenedAt    time.Time `json:"opened_at"`
 }
 
 // OpenOrder is a working order pending fill at the broker (limit/stop entry

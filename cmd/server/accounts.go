@@ -230,7 +230,7 @@ func (a *accounts) status(ctx context.Context) (any, error) {
 		openTrades = append(openTrades, map[string]any{
 			"trade_id": t.BrokerTradeID,
 			"symbol":   t.Symbol, "direction": directionOf(t.Units), "units": absInt(t.Units),
-			"open_price": t.OpenPrice, "current_price": t.CurrentPrice, "unrealized_pnl": t.UnrealizedPnL,
+			"open_price": t.OpenPrice, "current_price": t.CurrentPrice, "unrealized_pnl": t.UnrealizedPnL, "pnl_currency": t.PnLCurrency,
 			"stop_loss": t.StopLoss, "take_profit": t.TakeProfit, "opened_at": t.OpenedAt,
 		})
 	}
@@ -348,7 +348,7 @@ func (a *accounts) cancel(ctx context.Context) (any, error) {
 func tradeOf(t broker.OpenTrade) map[string]any {
 	return map[string]any{"trade_id": t.BrokerTradeID, "symbol": t.Symbol, "direction": directionOf(t.Units),
 		"units": absInt(t.Units), "open_price": t.OpenPrice, "current_price": t.CurrentPrice,
-		"unrealized_pnl": t.UnrealizedPnL, "stop_loss": t.StopLoss, "take_profit": t.TakeProfit}
+		"unrealized_pnl": t.UnrealizedPnL, "pnl_currency": t.PnLCurrency, "stop_loss": t.StopLoss, "take_profit": t.TakeProfit}
 }
 
 // findTrade is the open position with that id on the account in ctx, if there is one.
