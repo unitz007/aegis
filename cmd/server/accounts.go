@@ -521,6 +521,39 @@ func (a *accounts) amendOrder(ctx context.Context) (any, error) {
 	return map[string]any{"amended": false, "reason": "there is no waiting order with that id on this account (it may have filled or been cancelled already)"}, nil
 }
 
+// activity implements /account/activity: what the broker recorded on the account since a time (a unix second; a day
+// back at most): what each deal did and why, and what each closed trade made or lost. It only reads. A broker that
+// keeps no history says so (supported false) rather than failing.
+func (a *accounts) activity(ctx context.Context) (any, error) {
+	e, ok := executorFrom(ctx)
+	if !ok {
+		return nil, fmt.Errorf("no account in context")
+	}
+	var req struct {
+		Since int64 `json:"since"`
+	}
+	_ = json.Unmarshal(webhook.AccountRequestBody(ctx), &req)
+	since := time.Now().Add(-10 * time.Minute)
+	if req.Since > 0 {
+		since = time.Unix(req.Since, 0)
+	}
+	reader, ok := e.Broker.(broker.HistoryReader)
+	if !ok {
+		return map[string]any{"supported": false, "activities": []any{}, "results": []any{}}, nil
+	}
+	h, err := reader.History(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	if h.Activities == nil {
+		h.Activities = []broker.Activity{}
+	}
+	if h.Results == nil {
+		h.Results = []broker.TradeResult{}
+	}
+	return map[string]any{"supported": true, "activities": h.Activities, "results": h.Results}, nil
+}
+
 // directionOf says whether a signed size is a long (BUY) or a short (SELL) position.
 func directionOf(units int) string {
 	if units < 0 {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unitz007/aegis"
 	"github.com/unitz007/aegis/broker"
@@ -611,5 +612,23 @@ func TestCloseAndAmend_OneTradeOrOrderOnItsOwnAccount(t *testing.T) {
 	}
 	if again := call(ctx, r.a.closeTrade, map[string]any{"trade_id": tradeID}); again["closed"] != false || !strings.Contains(fmt.Sprint(again["reason"]), "no open trade") {
 		t.Errorf("twice: %v", again)
+	}
+}
+
+// /account/activity reads what the broker recorded; a broker that keeps no history says so instead of failing.
+func TestActivity_ABrokerWithNoHistorySaysSo(t *testing.T) {
+	r := newRig(t, false)
+	ctx, _, err := r.a.resolve(context.Background(), r.account(t, "capital", "demo", good()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"since": time.Now().Add(-time.Hour).Unix()})
+	out, err := r.a.activity(webhook.WithAccountRequestBody(ctx, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)
+	if got["supported"] != false {
+		t.Errorf("the paper broker keeps no history: %v", got)
 	}
 }

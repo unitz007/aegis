@@ -175,3 +175,39 @@ type ClosedTrade struct {
 	// before opening a new one — preserving the flip-close safety invariant (#5).
 	ExitReason string `json:"exit_reason,omitempty"`
 }
+
+// HistoryReader is an optional capability a Port may expose: what the broker recorded happening on the account
+// recently. It only reads.
+type HistoryReader interface {
+	// History returns what happened since a time, as far back as the broker keeps (Capital.com: a day).
+	History(ctx context.Context, since time.Time) (History, error)
+}
+
+// History is what happened on an account: what each deal did, and the money each closed trade made or lost.
+type History struct {
+	Activities []Activity    `json:"activities"`
+	Results    []TradeResult `json:"results"`
+}
+
+// Activity is one thing that happened to a deal: a position opened or closed, an order filled, expired or cancelled.
+type Activity struct {
+	DealID string `json:"deal_id"`
+	Symbol string `json:"symbol"`
+	// Kind is what it happened to: "position", "order", "levels" (a stop or target changed) or "other".
+	Kind string `json:"kind"`
+	// Status is the broker's own word for what happened, lower case: "accepted", "executed", "expired", "cancelled"…
+	Status string `json:"status"`
+	// By is what made it happen: "stop_loss", "take_profit", "you", "close_out" (not enough margin), "broker" or "".
+	By string    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// TradeResult is the profit or loss the broker booked for a closed trade, in Currency.
+type TradeResult struct {
+	Symbol    string    `json:"symbol"`
+	Amount    float64   `json:"amount"`
+	Currency  string    `json:"currency"`
+	Note      string    `json:"note,omitempty"`
+	Reference string    `json:"reference,omitempty"`
+	At        time.Time `json:"at"`
+}

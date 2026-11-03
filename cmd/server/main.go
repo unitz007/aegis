@@ -195,6 +195,8 @@ func main() {
 		mux.Handle("/order/amend", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.amendOrder))
 		mux.Handle("/position/close", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.closeTrade))
 		mux.Handle("/position/amend", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.amendTrade))
+		// /account/activity — signed; what the broker recorded on an account since a time (reads only, never trades)
+		mux.Handle("/account/activity", webhook.AccountCheckHandler(webhookSecret, accts.resolve, accts.activity))
 		mux.Handle("/account/key", keyHandler(sealPublic))
 		mux.Handle("/brokers", brokersHandler(registry, allowAccountLive))
 	} else {
@@ -205,6 +207,7 @@ func main() {
 		mux.Handle("/order/amend", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/position/close", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 		mux.Handle("/position/amend", webhook.AccountCheckHandler(webhookSecret, nil, nil))
+		mux.Handle("/account/activity", webhook.AccountCheckHandler(webhookSecret, nil, nil))
 	}
 
 	// /admin/ — owner's pause switch and status. Off unless ADMIN_TOKEN is set.
