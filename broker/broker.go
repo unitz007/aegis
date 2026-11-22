@@ -108,9 +108,11 @@ type TradeReceipt struct {
 
 // OpenTrade is a position currently held at the broker.
 type OpenTrade struct {
-	BrokerTradeID string  `json:"broker_trade_id"`
-	Symbol        string  `json:"symbol"`
-	Units         int     `json:"units"` // positive = long
+	BrokerTradeID string `json:"broker_trade_id"`
+	Symbol        string `json:"symbol"`
+	Units         int    `json:"units"` // positive = long; ±1 for a fractional size (see Quantity)
+	// Quantity is the size when it isn't whole (a crypto CFD's 0.0001 BTC); Units then only says the direction.
+	Quantity      float64 `json:"quantity,omitempty"`
 	OpenPrice     float64 `json:"open_price"`
 	CurrentPrice  float64 `json:"current_price"`
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
@@ -129,10 +131,11 @@ type OpenTrade struct {
 type OpenOrder struct {
 	BrokerOrderID string    `json:"broker_order_id"`
 	Symbol        string    `json:"symbol"`
-	Direction     string    `json:"direction"`  // "BUY" | "SELL"
-	Units         int       `json:"units"`      // positive = long, negative = short
-	OrderType     string    `json:"order_type"` // "LIMIT" | "STOP"
-	Level         float64   `json:"level"`      // trigger price
+	Direction     string    `json:"direction"`          // "BUY" | "SELL"
+	Units         int       `json:"units"`              // positive = long, negative = short; ±1 for a fractional size
+	Quantity      float64   `json:"quantity,omitempty"` // the size when it isn't whole (crypto)
+	OrderType     string    `json:"order_type"`         // "LIMIT" | "STOP"
+	Level         float64   `json:"level"`              // trigger price
 	TakeProfit    float64   `json:"take_profit,omitempty"`
 	StopLoss      float64   `json:"stop_loss,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`

@@ -691,3 +691,42 @@ func TestOpenTrades_CapitalsOwnProfitAndOpenTime(t *testing.T) {
 		t.Errorf("worked out without upl, in USD: %+v", eu)
 	}
 }
+
+// A market deal is the position it opened: listed, closed and changed by the affected deal that OPENED, not the
+// confirmation's own id. A fractional crypto size is kept as a quantity, and a sell stays a sell.
+func TestCapital_PositionIDAndFractionalSizes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/positions" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"dealReference":"REF1"}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/confirms/"):
+			_, _ = w.Write([]byte(`{"dealStatus":"ACCEPTED","status":"OPEN","dealId":"DEAL1","level":60882.3,` +
+				`"affectedDeals":[{"dealId":"POS1","status":"OPENED"}]}`))
+		case r.URL.Path == "/api/v1/positions" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"positions":[{"position":{"dealId":"POS1","direction":"SELL","size":0.0001,"level":60882.3},` +
+				`"market":{"epic":"BTCUSD","bid":60800,"offer":60850}}]}`))
+		case r.URL.Path == "/api/v1/workingorders":
+			_, _ = w.Write([]byte(`{"workingOrders":[{"workingOrderData":{"dealId":"O1","direction":"BUY","orderSize":0.5,"epic":"ETHUSD","orderType":"LIMIT","orderLevel":2000}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	a := newTestAdapter(srv.URL)
+	rec, err := a.placeMarketOrder(context.Background(), broker.TradeRequest{Symbol: "BTC/USD", Units: -1, Quantity: 0.0001})
+	if err != nil || rec.BrokerTradeID != "POS1" {
+		t.Fatalf("the position's id: %+v %v", rec, err)
+	}
+	trades, err := a.OpenTrades(context.Background())
+	if err != nil || len(trades) != 1 || trades[0].Units != -1 || trades[0].Quantity != 0.0001 {
+		t.Fatalf("a fractional sell: %+v %v", trades, err)
+	}
+	orders, err := a.OpenOrders(context.Background())
+	if err != nil || len(orders) != 1 || orders[0].Units != 1 || orders[0].Quantity != 0.5 {
+		t.Fatalf("a fractional order: %+v %v", orders, err)
+	}
+	if u, q := sized(20000, true); u != -20000 || q != 0 {
+		t.Errorf("a whole size: %d %v", u, q)
+	}
+}

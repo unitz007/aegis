@@ -271,7 +271,7 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 		return broker.TradeReceipt{}, fmt.Errorf("capital confirm rejected: %s", why)
 	}
 	return broker.TradeReceipt{
-		BrokerTradeID: confirm.DealID,
+		BrokerTradeID: confirm.positionID(),
 		Symbol:        req.Symbol,
 		Units:         req.Units,
 		FilledPrice:   confirm.Level,
@@ -306,6 +306,34 @@ type capitalConfirm struct {
 		DealID string `json:"dealId"`
 		Status string `json:"status"`
 	} `json:"affectedDeals"`
+}
+
+// positionID is the id of the position a market deal opened, the one its positions are listed, closed and changed by:
+// the affected deal that OPENED. The confirmation's own dealId is the deal's, not the position's (2026-11-22, a demo
+// BTCUSD buy: confirmed as …e39d, listed as …e3a0), so changing or closing by it found no open trade.
+func (c capitalConfirm) positionID() string {
+	for _, d := range c.AffectedDeals {
+		if strings.EqualFold(d.Status, "OPENED") && d.DealID != "" {
+			return d.DealID
+		}
+	}
+	return c.DealID
+}
+
+// sized is a Capital.com size as units and, when it isn't whole (a crypto CFD), its quantity: units then only say the
+// direction (±1), as a TradeRequest gives them. A fractional size had been cut to 0 units, so a crypto sell read as a buy.
+func sized(size float64, sell bool) (int, float64) {
+	units, qty := int(size), 0.0
+	if size != float64(units) {
+		qty = size
+		if units == 0 && size > 0 {
+			units = 1
+		}
+	}
+	if sell {
+		units = -units
+	}
+	return units, qty
 }
 
 // confirm reads Capital.com's confirmation of a deal. A refusal is logged with the whole answer: its reason isn't
@@ -517,11 +545,8 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 	out := make([]broker.OpenTrade, 0, len(resp.Positions))
 	for _, p := range resp.Positions {
 		// Capital.com returns size in raw units (lotSize=1), not decimal lots.
-		units := int(p.Position.Size)
 		isLong := p.Position.Direction != "SELL"
-		if !isLong {
-			units = -units
-		}
+		units, qty := sized(p.Position.Size, !isLong)
 
 		// Compute unrealized P&L using Capital's bid/ask from the market snapshot.
 		// LONG closes at bid, SHORT closes at offer (ask). Capital does not return
@@ -557,6 +582,7 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 			BrokerTradeID: p.Position.DealID,
 			Symbol:        sym,
 			Units:         units,
+			Quantity:      qty,
 			OpenPrice:     p.Position.Level,
 			CurrentPrice:  curPrice,
 			UnrealizedPnL: pnl,
@@ -605,10 +631,7 @@ func (a *Adapter) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 		if epic == "" {
 			epic = w.MarketData.Epic
 		}
-		units := int(d.OrderSize)
-		if d.Direction == "SELL" {
-			units = -units
-		}
+		units, qty := sized(d.OrderSize, d.Direction == "SELL")
 		created, _ := time.Parse("2006-01-02T15:04:05.000", d.CreatedDateUTC)
 		a.orderSourceMu.RLock()
 		src := a.orderSources[d.DealID]
@@ -619,6 +642,7 @@ func (a *Adapter) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 			Symbol:        fromCapitalEpic(epic),
 			Direction:     d.Direction,
 			Units:         units,
+			Quantity:      qty,
 			OrderType:     d.OrderType,
 			Level:         d.OrderLevel,
 			TakeProfit:    d.ProfitLevel,
