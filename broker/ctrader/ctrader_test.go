@@ -99,6 +99,20 @@ func (s *openAPI) serve(w http.ResponseWriter, r *http.Request) {
 				raw, _ := json.Marshal(map[string]any{"ctidTraderAccountId": 42, "symbolId": id, "bid": bid, "ask": ask})
 				_ = ws.WriteJSON(message{PayloadType: tSpotEvent, Payload: raw})
 			}
+		case tAccountsByTokenReq:
+			if p["accessToken"] != "tok" {
+				fail("CH_ACCESS_TOKEN_INVALID")
+				break
+			}
+			reply(tAccountsByTokenRes, map[string]any{"permissionScope": "SCOPE_TRADE", "ctidTraderAccount": []any{
+				map[string]any{"ctidTraderAccountId": 42, "isLive": false, "traderLogin": 5012345, "brokerTitleShort": "Pepperstone"},
+				map[string]any{"ctidTraderAccountId": 43, "isLive": true, "traderLogin": 7012345, "brokerTitleShort": "Pepperstone"}}})
+		case tRefreshTokenReq:
+			if p["refreshToken"] != "ref" {
+				fail("CH_ACCESS_TOKEN_INVALID")
+				break
+			}
+			reply(tRefreshTokenRes, map[string]any{"accessToken": "tok2", "tokenType": "bearer", "expiresIn": 2628000, "refreshToken": "ref2"})
 		case tTraderReq:
 			reply(tTraderRes, map[string]any{"trader": map[string]any{"balance": "1000000", "moneyDigits": 2, "depositAssetId": 7}})
 		case tAssetListReq:
@@ -292,5 +306,44 @@ func TestSymbol_Hours(t *testing.T) {
 	s.mode = 1
 	if h := s.hours(sun.Add(6 * time.Hour)); h.Open {
 		t.Error("trading switched off")
+	}
+}
+
+// Signing in: the page with the application's id, the code turned into tokens, the trader's accounts, a renewed access.
+func TestSignIn(t *testing.T) {
+	ctx := context.Background()
+	_, env := pretend(t)
+	if u := AuthorizeURL("app", "https://x.test/cb", "trading", "st"); !strings.Contains(u, "client_id=app") || !strings.Contains(u, "scope=trading") || !strings.Contains(u, "redirect_uri=https%3A%2F%2Fx.test%2Fcb") {
+		t.Errorf("page: %s", u)
+	}
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("grant_type") != "authorization_code" || q.Get("code") != "c0de" || q.Get("client_secret") != "secret" {
+			_, _ = w.Write([]byte(`{"errorCode":"ACCESS_DENIED","description":"bad code"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"accessToken":"tok","tokenType":"bearer","expiresIn":2628000,"refreshToken":"ref","errorCode":null,"description":null}`))
+	}))
+	defer tokens.Close()
+	was := TokenURL
+	TokenURL = tokens.URL
+	defer func() { TokenURL = was }()
+	tok, err := ExchangeCode(ctx, "app", "secret", "c0de", "https://x.test/cb")
+	if err != nil || tok.Access != "tok" || tok.Refresh != "ref" || time.Until(tok.Expires) < 29*24*time.Hour {
+		t.Fatalf("tokens: %+v %v", tok, err)
+	}
+	if _, err := ExchangeCode(ctx, "app", "secret", "old", "https://x.test/cb"); err == nil || !strings.Contains(err.Error(), "bad code") {
+		t.Errorf("a code refused: %v", err)
+	}
+	accts, trading, err := Accounts(ctx, env, "app", "secret", "tok")
+	if err != nil || !trading || len(accts) != 2 || accts[0].ID != "42" || accts[0].Live || !accts[1].Live || accts[0].Broker != "Pepperstone" || accts[0].Login != "5012345" {
+		t.Fatalf("accounts: %+v %v %v", accts, trading, err)
+	}
+	renewed, err := Refresh(ctx, env, "app", "secret", "ref")
+	if err != nil || renewed.Access != "tok2" || renewed.Refresh != "ref2" {
+		t.Fatalf("renewed: %+v %v", renewed, err)
+	}
+	if _, err := Refresh(ctx, env, "app", "secret", "revoked"); !errors.Is(err, ErrAccess) {
+		t.Errorf("a refresh refused is access gone: %v", err)
 	}
 }

@@ -62,6 +62,8 @@ const (
 	tAccountsByTokenReq  = 2149
 	tAccountsByTokenRes  = 2150
 	tAccountDisconnected = 2164
+	tRefreshTokenReq     = 2173
+	tRefreshTokenRes     = 2174
 	tUnrealizedPnLReq    = 2187
 	tUnrealizedPnLRes    = 2188
 )
