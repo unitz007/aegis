@@ -57,7 +57,7 @@ type Broker struct {
 type paperTrade struct {
 	id         string
 	symbol     string
-	units      int     // positive = long, negative = short
+	units      int // positive = long, negative = short
 	openPrice  float64
 	takeProfit float64
 	stopLoss   float64

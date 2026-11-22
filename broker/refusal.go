@@ -45,6 +45,10 @@ func AsRefused(err error) (*Refused, bool) {
 	return nil, false
 }
 
+// ErrAccessGone is an account whose access the broker no longer accepts (a sign-in that ran out or was withdrawn): the
+// person must connect it again. Adapters wrap it, so a caller can tell it from a refusal or a fault.
+var ErrAccessGone = errors.New("broker: the account's access is gone")
+
 // MarketHours is whether a market is open now and, when it isn't, when it next opens (zero when the broker can't
 // say).
 type MarketHours struct {

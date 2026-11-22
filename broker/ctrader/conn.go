@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/unitz007/aegis/broker"
 )
 
 // Hosts are the Open API's JSON endpoints by environment (a demo account is reached only on demo, a live one on live).
@@ -107,7 +108,7 @@ var authCodes = map[string]bool{"OA_AUTH_TOKEN_EXPIRED": true, "CH_ACCESS_TOKEN_
 	"CH_CTID_TRADER_ACCOUNT_NOT_FOUND": true, "RET_NO_SUCH_LOGIN": true, "RET_ACCOUNT_DISABLED": true}
 
 // ErrAccess is an account whose access was refused or revoked (the caller refreshes the token or asks to sign in again).
-var ErrAccess = errors.New("ctrader: the account's access was refused")
+var ErrAccess = fmt.Errorf("ctrader: %w", broker.ErrAccessGone)
 
 func errorOf(m message) error {
 	f := m.fields()
