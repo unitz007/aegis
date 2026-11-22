@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -250,7 +251,7 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 		}
 	}
 	if result.Status == "REJECTED" {
-		return broker.TradeReceipt{}, fmt.Errorf("capital order rejected: %s", result.Reason)
+		return broker.TradeReceipt{}, rejectedDeal("capital order rejected: %s", result.Reason)
 	}
 
 	// Confirm the deal to get the filled price and dealId.
@@ -268,7 +269,7 @@ func (a *Adapter) placeMarketOrder(ctx context.Context, req broker.TradeRequest)
 		}, nil
 	}
 	if why, rejected := confirm.rejected(); rejected {
-		return broker.TradeReceipt{}, fmt.Errorf("capital confirm rejected: %s", why)
+		return broker.TradeReceipt{}, rejectedDeal("capital confirm rejected: %s", why)
 	}
 	return broker.TradeReceipt{
 		BrokerTradeID: confirm.positionID(),
@@ -445,7 +446,7 @@ func (a *Adapter) placeLimitOrder(ctx context.Context, req broker.TradeRequest) 
 		}
 	}
 	if result.Status == "REJECTED" {
-		return broker.TradeReceipt{}, fmt.Errorf("capital limit order rejected: %s", result.Reason)
+		return broker.TradeReceipt{}, rejectedDeal("capital limit order rejected: %s", result.Reason)
 	}
 
 	// Confirm the working order to obtain the permanent dealId.
@@ -455,7 +456,7 @@ func (a *Adapter) placeLimitOrder(ctx context.Context, req broker.TradeRequest) 
 	dealID := result.DealReference // fallback if confirm call fails
 	if confirm, err := a.confirm(ctx, result.DealReference); err == nil {
 		if why, rejected := confirm.rejected(); rejected {
-			return broker.TradeReceipt{}, fmt.Errorf("capital limit order confirm rejected: %s", why)
+			return broker.TradeReceipt{}, rejectedDeal("capital limit order confirm rejected: %s", why)
 		}
 		if confirm.DealID != "" {
 			dealID = confirm.DealID
@@ -677,7 +678,7 @@ func (a *Adapter) CancelOrder(ctx context.Context, brokerOrderID string) error {
 		return fmt.Errorf("capital cancel %s: couldn't confirm it: %w", brokerOrderID, err)
 	}
 	if why, refused := confirm.rejected(); refused {
-		return fmt.Errorf("capital cancel %s rejected: %s", brokerOrderID, why)
+		return rejectedDeal("capital cancel %s rejected: %s", why, brokerOrderID)
 	}
 	return nil
 }
@@ -724,7 +725,7 @@ func (a *Adapter) confirmed(ctx context.Context, what, dealID, dealReference str
 		return fmt.Errorf("capital %s %s: couldn't confirm it: %w", what, dealID, err)
 	}
 	if why, refused := c.rejected(); refused {
-		return fmt.Errorf("capital %s %s rejected: %s", what, dealID, why)
+		return rejectedDeal("capital %s %s rejected: %s", why, what, dealID)
 	}
 	return nil
 }
@@ -997,8 +998,12 @@ func (a *Adapter) do(req *http.Request, out any) error {
 			return fmt.Errorf("capital read body: %w", err)
 		}
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("capital %s %s → HTTP %d: %s",
+			whole := fmt.Sprintf("capital %s %s → HTTP %d: %s",
 				req.Method, req.URL.Path, resp.StatusCode, truncate(string(raw), 200))
+			if resp.StatusCode < 500 {
+				return refusalOf(raw, whole) // Capital.com's "no", sorted into the kinds every broker shares
+			}
+			return errors.New(whole)
 		}
 		if out != nil && len(raw) > 0 {
 			if err := json.Unmarshal(raw, out); err != nil {
