@@ -17,12 +17,20 @@ type Credentials map[string]string
 //	StrategyFields — the person types in login details (API key, email, password, an
 //	                 account number…). Fields lists exactly what to ask for.
 //
+//	StrategyOAuth  — the person signs in on the broker's own page and grants the platform's
+//	                 application access to their account (cTrader). The client runs the
+//	                 sign-in, and keeps the account's id and its tokens as the Fields listed
+//	                 (refreshing them as they run out).
+//
 // A strategy a client doesn't know is simply not offered to it. To support another
-// kind (for example "sign in with the broker" through OAuth) add its constant here,
-// teach Register what it needs, and add a handler for it in the client.
-const StrategyFields = "fields"
+// kind add its constant here, teach Register what it needs, and add a handler for it
+// in the client.
+const (
+	StrategyFields = "fields"
+	StrategyOAuth  = "oauth"
+)
 
-var knownStrategies = map[string]bool{StrategyFields: true}
+var knownStrategies = map[string]bool{StrategyFields: true, StrategyOAuth: true}
 
 // Field is one detail a broker login needs, described so a screen can ask for it.
 type Field struct {

@@ -2,7 +2,10 @@ module github.com/unitz007/aegis
 
 go 1.26
 
-require github.com/mark3labs/mcp-go v0.54.1
+require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/mark3labs/mcp-go v0.54.1
+)
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
