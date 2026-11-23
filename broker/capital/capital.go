@@ -943,9 +943,22 @@ func (a *Adapter) setHeaders(req *http.Request) {
 // rate-limit episode fails loudly rather than blocking a scan indefinitely.
 const capitalMax429Retries = 4
 
+// freshSession drops the session and signs in again, then puts the new tokens on req.
+func (a *Adapter) freshSession(req *http.Request) error {
+	a.mu.Lock()
+	a.cst = ""
+	a.mu.Unlock()
+	if err := a.ensureSession(req.Context()); err != nil {
+		return err
+	}
+	a.setHeaders(req)
+	return nil
+}
+
 func (a *Adapter) do(req *http.Request, out any) error {
 	ctx := req.Context()
 	var lastErr error
+	signedInAgain := false // a 401, or a read Capital.com failed on its side, is tried once more with a new session
 	for attempt := 0; attempt <= capitalMax429Retries; attempt++ {
 		// Pace every attempt through the shared gate (incl. retries) so we
 		// never exceed Capital's req/s cap even while backing off.
@@ -968,9 +981,18 @@ func (a *Adapter) do(req *http.Request, out any) error {
 			return fmt.Errorf("capital http: %w", err)
 		}
 
-		// On 401, session expired — force re-auth on next call.
+		// On 401 the session has gone (expired, or replaced by a newer sign-in with the same key): sign in again and
+		// try once more; Capital.com acted on nothing it refused this way, so a change is safe to send again.
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
+			if !signedInAgain {
+				signedInAgain = true
+				if err := a.freshSession(req); err != nil {
+					return fmt.Errorf("capital: session expired, signing in again: %w", err)
+				}
+				attempt--
+				continue
+			}
 			a.mu.Lock()
 			a.cst = ""
 			a.mu.Unlock()
@@ -1002,6 +1024,20 @@ func (a *Adapter) do(req *http.Request, out any) error {
 				req.Method, req.URL.Path, resp.StatusCode, truncate(string(raw), 200))
 			if resp.StatusCode < 500 {
 				return refusalOf(raw, whole) // Capital.com's "no", sorted into the kinds every broker shares
+			}
+			// A read that failed on Capital.com's side (error.internal, about one read in five on 23 November, often a
+			// session it no longer honours) is asked once more with a new session. Never a change: it may have gone
+			// through.
+			if req.Method == http.MethodGet && !signedInAgain {
+				signedInAgain = true
+				if err := sleepCtx(ctx, 300*time.Millisecond); err != nil {
+					return err
+				}
+				if err := a.freshSession(req); err != nil {
+					return errors.New(whole)
+				}
+				attempt--
+				continue
 			}
 			return errors.New(whole)
 		}
