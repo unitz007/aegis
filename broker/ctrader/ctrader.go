@@ -19,11 +19,12 @@ type Adapter struct {
 	account int64
 	token   string
 
-	mu       sync.Mutex
-	symbols  map[string]int64 // normalised name → id
-	names    map[int64]string
-	details  map[int64]*symbol
-	currency string
+	mu        sync.Mutex
+	symbols   map[string]int64 // normalised name → id
+	names     map[int64]string
+	symbolsAt time.Time
+	details   map[int64]*symbol
+	currency  string
 }
 
 var (
@@ -144,32 +145,43 @@ func norm(s string) string {
 	}, strings.ToUpper(strings.TrimSpace(s)))
 }
 
-func (a *Adapter) symbolID(ctx context.Context, name string) (int64, error) {
+// loadSymbols reads the account's symbols once: the ids of those it may trade by their names, and every symbol's name
+// by its id (disabled ones too, so a position on one is still named). Asked again when a name isn't known, at most
+// once a minute, for a symbol the broker added since.
+func (a *Adapter) loadSymbols(ctx context.Context, again bool) error {
 	a.mu.Lock()
-	loaded := a.symbols != nil
+	loaded, recent := a.symbols != nil, time.Since(a.symbolsAt) < time.Minute
 	a.mu.Unlock()
-	if !loaded {
-		f, err := a.ask(ctx, tSymbolsListReq, map[string]any{}, tSymbolsListRes)
-		if err != nil {
-			return 0, err
+	if loaded && (!again || recent) {
+		return nil
+	}
+	f, err := a.ask(ctx, tSymbolsListReq, map[string]any{}, tSymbolsListRes)
+	if err != nil {
+		return err
+	}
+	ids, names := map[string]int64{}, map[int64]string{}
+	for _, s := range objs(f["symbol"]) {
+		id, n := i64(s["symbolId"]), str(s["symbolName"])
+		if id == 0 || n == "" {
+			continue
 		}
-		ids, names := map[string]int64{}, map[int64]string{}
-		for _, s := range objs(f["symbol"]) {
-			if en, ok := s["enabled"].(bool); ok && !en {
-				continue
-			}
-			id, n := i64(s["symbolId"]), str(s["symbolName"])
-			if id == 0 || n == "" {
-				continue
-			}
-			names[id] = n
-			if _, taken := ids[norm(n)]; !taken {
-				ids[norm(n)] = id
-			}
+		names[id] = n
+		if en, ok := s["enabled"].(bool); ok && !en {
+			continue
 		}
-		a.mu.Lock()
-		a.symbols, a.names = ids, names
-		a.mu.Unlock()
+		if _, taken := ids[norm(n)]; !taken {
+			ids[norm(n)] = id
+		}
+	}
+	a.mu.Lock()
+	a.symbols, a.names, a.symbolsAt = ids, names, time.Now()
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *Adapter) symbolID(ctx context.Context, name string) (int64, error) {
+	if err := a.loadSymbols(ctx, false); err != nil {
+		return 0, err
 	}
 	want := norm(name)
 	a.mu.Lock()
@@ -194,13 +206,23 @@ func (a *Adapter) symbolID(ctx context.Context, name string) (int64, error) {
 	return 0, &broker.Refused{Kind: broker.RefusedOther, BrokerSaid: "SYMBOL_NOT_FOUND", Err: "ctrader: no symbol " + name + " on this account"}
 }
 
-func (a *Adapter) nameOf(id int64) string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if n := a.names[id]; n != "" {
-		return n
+// nameOf is a symbol's name ("EURUSD") from its id, reading the account's symbols when they aren't known yet: positions
+// and orders name their symbol only by its id, and a connection that only reads (Check Trades, the trade watcher) may
+// never have looked a name up. Only when the broker doesn't name it at all is it the id.
+func (a *Adapter) nameOf(ctx context.Context, id int64) string {
+	known := func() (string, bool) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.names[id], a.symbols != nil
 	}
-	return strconv.FormatInt(id, 10)
+	n, loaded := known()
+	if n == "" && a.loadSymbols(ctx, loaded) == nil {
+		n, _ = known()
+	}
+	if n == "" {
+		return strconv.FormatInt(id, 10)
+	}
+	return n
 }
 
 func (a *Adapter) symbol(ctx context.Context, id int64) (*symbol, error) {
@@ -314,7 +336,7 @@ func (a *Adapter) quote(ctx context.Context, id int64) (float64, float64, error)
 	q = a.c.quotes[k]
 	a.c.mu.Unlock()
 	if q.bid <= 0 || q.ask <= 0 {
-		return 0, 0, fmt.Errorf("ctrader: no price for %s", a.nameOf(id))
+		return 0, 0, fmt.Errorf("ctrader: no price for %s", a.nameOf(ctx, id))
 	}
 	return q.bid, q.ask, nil
 }
@@ -449,7 +471,7 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 		sym := i64(td["symbolId"])
 		sell := enum(td["tradeSide"], sideNames) == sideSell
 		units, qty := sized(i64(td["volume"]), sell)
-		t := broker.OpenTrade{BrokerTradeID: strconv.FormatInt(i64(p["positionId"]), 10), Symbol: a.nameOf(sym), Units: units, Quantity: qty,
+		t := broker.OpenTrade{BrokerTradeID: strconv.FormatInt(i64(p["positionId"]), 10), Symbol: a.nameOf(ctx, sym), Units: units, Quantity: qty,
 			OpenPrice: f64(p["price"]), StopLoss: f64(p["stopLoss"]), TakeProfit: f64(p["takeProfit"]), OpenedAt: ms(td["openTimestamp"]), PnLCurrency: cur}
 		if v, ok := pnl[i64(p["positionId"])]; ok {
 			t.UnrealizedPnL = v
@@ -500,7 +522,7 @@ func (a *Adapter) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 		if typ == orderStop {
 			kind, level = "STOP", f64(o["stopPrice"])
 		}
-		out = append(out, broker.OpenOrder{BrokerOrderID: strconv.FormatInt(i64(o["orderId"]), 10), Symbol: a.nameOf(i64(td["symbolId"])),
+		out = append(out, broker.OpenOrder{BrokerOrderID: strconv.FormatInt(i64(o["orderId"]), 10), Symbol: a.nameOf(ctx, i64(td["symbolId"])),
 			Direction: dir, Units: units, Quantity: qty, OrderType: kind, Level: level, StopLoss: f64(o["stopLoss"]), TakeProfit: f64(o["takeProfit"]),
 			CreatedAt: ms(td["openTimestamp"])})
 	}

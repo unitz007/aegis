@@ -77,7 +77,8 @@ func (s *openAPI) serve(w http.ResponseWriter, r *http.Request) {
 			reply(tSymbolsListRes, map[string]any{"symbol": []any{
 				map[string]any{"symbolId": 1, "symbolName": "EURUSD", "enabled": true},
 				map[string]any{"symbolId": 2, "symbolName": "BTCUSD", "enabled": true},
-				map[string]any{"symbolId": 3, "symbolName": "USDJPY", "enabled": true}}})
+				map[string]any{"symbolId": 3, "symbolName": "USDJPY", "enabled": true},
+				map[string]any{"symbolId": 4, "symbolName": "GBPJPY", "enabled": false}}})
 		case tSymbolByIDReq:
 			id := ints(p["symbolId"])[0]
 			sym := map[string]any{"symbolId": id, "digits": 5, "minVolume": 100000, "maxVolume": 1000000000, "stepVolume": 100000, "scheduleTimeZone": "UTC",
@@ -345,5 +346,37 @@ func TestSignIn(t *testing.T) {
 	}
 	if _, err := Refresh(ctx, env, "app", "secret", "revoked"); !errors.Is(err, ErrAccess) {
 		t.Errorf("a refresh refused is access gone: %v", err)
+	}
+}
+
+// A connection that only reads (Check Trades, the trade watcher) names each position and order by its symbol, never by
+// the id cTrader gives it, even on a symbol the account may no longer trade. Found on a real demo account: "SELL 8000 3".
+func TestAdapter_ReadsNameTheirSymbols(t *testing.T) {
+	ctx := context.Background()
+	s, env := pretend(t)
+	td := func(sym int64, side int) map[string]any {
+		return map[string]any{"symbolId": sym, "volume": 800000, "tradeSide": side, "openTimestamp": time.Now().UnixMilli()}
+	}
+	s.positions[71] = map[string]any{"positionId": 71, "price": 174.841, "stopLoss": 175.5, "tradeData": td(3, sideSell)}
+	s.positions[72] = map[string]any{"positionId": 72, "price": 199.1, "tradeData": td(4, sideBuy)}
+	s.orders[81] = map[string]any{"orderId": 81, "orderType": orderLimit, "limitPrice": 1.05, "tradeData": td(1, sideBuy)}
+	a, err := New(env, "app", "secret", "42", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trades, err := a.OpenTrades(ctx)
+	if err != nil || len(trades) != 2 {
+		t.Fatalf("open: %+v %v", trades, err)
+	}
+	got := map[string]string{}
+	for _, tr := range trades {
+		got[tr.BrokerTradeID] = tr.Symbol
+	}
+	if got["71"] != "USDJPY" || got["72"] != "GBPJPY" {
+		t.Errorf("trades named %v", got)
+	}
+	orders, err := a.OpenOrders(ctx)
+	if err != nil || len(orders) != 1 || orders[0].Symbol != "EURUSD" {
+		t.Errorf("orders: %+v %v", orders, err)
 	}
 }
