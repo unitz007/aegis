@@ -575,7 +575,10 @@ func (a *Adapter) OpenTrades(ctx context.Context) ([]broker.OpenTrade, error) {
 
 		pnlCurrency := "USD"
 		if p.Position.Upl != nil {
-			pnl, pnlCurrency = *p.Position.Upl, cleanCurrencyCode(p.Position.Currency)
+			// Capital.com's upl is in the account's currency, not the position's (2026-11-26: a EUR account's AUD/USD
+			// sell had upl -2.62 and position currency USD, and the account's equity was 2.62 EUR under its balance;
+			// the same on an earlier read, -1.09). Left unsaid, the caller takes the account's.
+			pnl, pnlCurrency = *p.Position.Upl, ""
 		}
 		opened, _ := time.Parse("2006-01-02T15:04:05.000", p.Position.CreatedDateUTC)
 

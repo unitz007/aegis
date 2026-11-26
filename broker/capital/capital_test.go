@@ -663,7 +663,7 @@ func TestCapitalAdapter_ConfirmedCloseAndAmend(t *testing.T) {
 	}
 }
 
-// A position's P&L is Capital.com's own (upl, in the position's currency) and its open time is read; without upl it
+// A position's P&L is Capital.com's own (upl, in the account's currency, so left unsaid) and its open time is read; without upl it
 // is worked out as before, in USD, and said to be.
 func TestOpenTrades_CapitalsOwnProfitAndOpenTime(t *testing.T) {
 	body := `{"positions":[
@@ -684,7 +684,7 @@ func TestOpenTrades_CapitalsOwnProfitAndOpenTime(t *testing.T) {
 		t.Fatalf("%v %v", trades, err)
 	}
 	eg := trades[0]
-	if eg.UnrealizedPnL != -12.34 || eg.PnLCurrency != "EUR" || eg.OpenedAt.Format("15:04") != "09:06" || eg.CurrentPrice != 0.8371 {
+	if eg.UnrealizedPnL != -12.34 || eg.PnLCurrency != "" || eg.OpenedAt.Format("15:04") != "09:06" || eg.CurrentPrice != 0.8371 {
 		t.Errorf("Capital.com's own figure, its currency and open time: %+v", eg)
 	}
 	if eu := trades[1]; eu.PnLCurrency != "USD" || eu.UnrealizedPnL < 4.9 || eu.UnrealizedPnL > 5.1 {
