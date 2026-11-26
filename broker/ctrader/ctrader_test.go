@@ -380,3 +380,55 @@ func TestAdapter_ReadsNameTheirSymbols(t *testing.T) {
 		t.Errorf("orders: %+v %v", orders, err)
 	}
 }
+
+// A stream pushes the prices of the symbols asked for, as Open API spot events come, and a trade event of the account
+// whenever an order fills or a position changes; it closes once its context is done.
+func TestAdapter_Stream(t *testing.T) {
+	s, env := pretend(t)
+	a, err := New(env, "app", "secret", "42", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var _ broker.Streamer = a
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := a.Stream(ctx, []string{"EURUSD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := func() broker.StreamEvent {
+		t.Helper()
+		select {
+		case e, ok := <-ch:
+			if !ok {
+				t.Fatal("closed")
+			}
+			return e
+		case <-time.After(3 * time.Second):
+			t.Fatal("nothing pushed")
+		}
+		return broker.StreamEvent{}
+	}
+	if e := next(); e.Symbol != "EURUSD" || e.Bid != 1.09678 || e.Ask != 1.09685 || e.Trade {
+		t.Fatalf("its price: %+v", e)
+	}
+	if _, err := a.PlaceTrade(context.Background(), broker.TradeRequest{Symbol: "EURUSD", Units: 1000, OrderType: "market", StopLoss: 1.0918, TakeProfit: 1.1068}); err != nil {
+		t.Fatal(err)
+	}
+	if e := next(); !e.Trade {
+		t.Fatalf("a trade event: %+v", e)
+	}
+	_ = s
+	cancel()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("not closed once its context was done")
+		}
+	}
+}

@@ -136,9 +136,29 @@ type conn struct {
 	quotes  map[[2]int64]quote      // last bid and ask by account and symbol
 	subbed  map[[2]int64]bool       // spot subscriptions on this connection
 	waiters map[[2]int64][]chan struct{}
+	// streams opened on an account (Adapter.Stream): its prices and its trade events, pushed as they come
+	streams map[int64][]*listener
 
 	wmu sync.Mutex // one writer at a time
 	seq atomic.Int64
+}
+
+// listener is one open stream: the symbols it wants by id (their names, said back), and where events go.
+type listener struct {
+	ch     chan broker.StreamEvent
+	names  map[int64]string
+	closed bool
+}
+
+// push sends without waiting: a reader that has fallen behind loses this event, and the next supersedes it.
+func (l *listener) push(e broker.StreamEvent) {
+	if l.closed {
+		return
+	}
+	select {
+	case l.ch <- e:
+	default:
+	}
 }
 
 type quote struct {
@@ -180,6 +200,9 @@ func (c *conn) ensure(ctx context.Context) error {
 	c.ws, c.gen = ws, c.gen+1
 	c.authed, c.pending = map[int64]string{}, map[string]chan message{}
 	c.quotes, c.subbed, c.waiters = map[[2]int64]quote{}, map[[2]int64]bool{}, map[[2]int64][]chan struct{}{}
+	if c.streams == nil {
+		c.streams = map[int64][]*listener{}
+	}
 	gen := c.gen
 	c.mu.Unlock()
 	go c.read(ws, gen)
@@ -209,6 +232,41 @@ func (c *conn) drop(ws *websocket.Conn, gen int) {
 			close(w)
 		}
 		delete(c.waiters, k)
+	}
+	// open streams end with the connection (their spot subscriptions are gone): whoever reads opens them again
+	for acct, ls := range c.streams {
+		for _, l := range ls {
+			if !l.closed {
+				l.closed = true
+				close(l.ch)
+			}
+		}
+		delete(c.streams, acct)
+	}
+}
+
+// listen adds an open stream on an account; the function it gives ends it.
+func (c *conn) listen(acct int64, l *listener) func() {
+	c.mu.Lock()
+	if c.streams == nil {
+		c.streams = map[int64][]*listener{}
+	}
+	c.streams[acct] = append(c.streams[acct], l)
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		ls := c.streams[acct]
+		for i, x := range ls {
+			if x == l {
+				c.streams[acct] = append(ls[:i:i], ls[i+1:]...)
+				break
+			}
+		}
+		if !l.closed {
+			l.closed = true
+			close(l.ch)
+		}
 	}
 }
 
@@ -267,6 +325,14 @@ func (c *conn) read(ws *websocket.Conn, gen int) {
 			c.mu.Unlock()
 			continue
 		}
+		if m.PayloadType == tExecutionEvent { // something happened to an account's trades: every open stream on it hears
+			acct := i64(m.fields()["ctidTraderAccountId"])
+			c.mu.Lock()
+			for _, l := range c.streams[acct] {
+				l.push(broker.StreamEvent{Trade: true})
+			}
+			c.mu.Unlock()
+		}
 		id := m.ClientMsgID
 		if id == "" && m.PayloadType == tExecutionEvent {
 			if o, ok := m.fields()["order"].(map[string]any); ok {
@@ -302,6 +368,13 @@ func (c *conn) spot(f fields) {
 	}
 	q.at = time.Now()
 	c.quotes[k] = q
+	if q.bid > 0 && q.ask > 0 {
+		for _, l := range c.streams[acct] {
+			if name, ok := l.names[sym]; ok {
+				l.push(broker.StreamEvent{Symbol: name, Bid: q.bid, Ask: q.ask})
+			}
+		}
+	}
 	if q.bid > 0 && q.ask > 0 {
 		for _, w := range c.waiters[k] {
 			close(w)

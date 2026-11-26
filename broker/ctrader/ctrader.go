@@ -317,15 +317,9 @@ func (a *Adapter) quote(ctx context.Context, id int64) (float64, float64, error)
 	a.c.waiters[k] = append(a.c.waiters[k], wait)
 	a.c.mu.Unlock()
 	if !subbed {
-		if _, err := a.ask(ctx, tSubscribeSpotsReq, map[string]any{"symbolId": []int64{id}}, tSubscribeSpotsRes); err != nil {
-			var e *APIError
-			if !(errors.As(err, &e) && e.Code == "ALREADY_SUBSCRIBED") {
-				return 0, 0, err
-			}
+		if err := a.subscribe(ctx, id); err != nil {
+			return 0, 0, err
 		}
-		a.c.mu.Lock()
-		a.c.subbed[k] = true
-		a.c.mu.Unlock()
 	}
 	select {
 	case <-wait:
@@ -339,6 +333,56 @@ func (a *Adapter) quote(ctx context.Context, id int64) (float64, float64, error)
 		return 0, 0, fmt.Errorf("ctrader: no price for %s", a.nameOf(ctx, id))
 	}
 	return q.bid, q.ask, nil
+}
+
+// subscribe asks the Open API to push a symbol's prices on this account's connection.
+func (a *Adapter) subscribe(ctx context.Context, id int64) error {
+	k := [2]int64{a.account, id}
+	a.c.mu.Lock()
+	subbed := a.c.subbed[k]
+	a.c.mu.Unlock()
+	if subbed {
+		return nil
+	}
+	if _, err := a.ask(ctx, tSubscribeSpotsReq, map[string]any{"symbolId": []int64{id}}, tSubscribeSpotsRes); err != nil {
+		var e *APIError
+		if !(errors.As(err, &e) && e.Code == "ALREADY_SUBSCRIBED") {
+			return err
+		}
+	}
+	a.c.mu.Lock()
+	a.c.subbed[k] = true
+	a.c.mu.Unlock()
+	return nil
+}
+
+// Stream pushes the prices of the symbols asked for (each subscribed once on the shared connection) and every trade
+// event of this account (an order filled or cancelled, a position opened, changed or closed), until ctx is done or the
+// connection drops (broker.Streamer).
+func (a *Adapter) Stream(ctx context.Context, symbols []string) (<-chan broker.StreamEvent, error) {
+	if err := a.ready(ctx); err != nil {
+		return nil, err
+	}
+	l := &listener{ch: make(chan broker.StreamEvent, 64), names: map[int64]string{}}
+	for _, sym := range symbols {
+		id, err := a.symbolID(ctx, sym)
+		if err != nil {
+			return nil, err
+		}
+		l.names[id] = sym
+	}
+	stop := a.c.listen(a.account, l) // before subscribing: the first prices come at once
+	for id := range l.names {
+		if err := a.subscribe(ctx, id); err != nil {
+			stop()
+			return nil, err
+		}
+	}
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return l.ch, nil
 }
 
 // ── placing ──

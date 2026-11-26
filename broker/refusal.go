@@ -60,3 +60,20 @@ type MarketHours struct {
 type MarketHoursProvider interface {
 	MarketHours(ctx context.Context, symbol string) (MarketHours, error)
 }
+
+// StreamEvent is something an account pushes as it happens: a pair's bid and ask, or something happening to its trades
+// (an order filled or cancelled, a position opened, changed or closed: Trade, with nothing else, since what changed is
+// read from the account).
+type StreamEvent struct {
+	Symbol   string
+	Bid, Ask float64
+	Trade    bool
+}
+
+// Streamer is an adapter whose broker pushes prices and what happens to an account's trades (cTrader's Open API).
+// Stream gives the prices of the symbols asked for and every trade event of the account, until ctx is done; the channel
+// is closed then, or when the connection drops (open it again to carry on). Events are dropped rather than queued when
+// the reader falls behind: each price supersedes the last.
+type Streamer interface {
+	Stream(ctx context.Context, symbols []string) (<-chan StreamEvent, error)
+}
